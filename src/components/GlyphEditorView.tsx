@@ -18,7 +18,10 @@ import {
   GlyphData,
   RESOLUTION_SPECS,
 } from '../types/font';
-import { getContextualSampleWord } from '../engine/shaper';
+import {
+  getContextualSampleWord,
+  matchesJoiningNuqtaScope,
+} from '../engine/shaper';
 import { SvgDotShape, VectorLineSvg } from './DotSvgRenderer';
 
 interface GlyphEditorViewProps {
@@ -423,8 +426,18 @@ export const GlyphEditorView: React.FC<GlyphEditorViewProps> = ({
                               cx={cellPixelSize / 2}
                               cy={cellPixelSize / 2}
                               r={
-                                cell === 2 && params.nuqtaMode !== 'uniform'
-                                  ? Math.min(cellPixelSize * 0.45, dotRadius * params.nuqtaScale)
+                                cell === 2
+                                  ? Math.min(
+                                      cellPixelSize * 0.46,
+                                      dotRadius *
+                                        (params.nuqtaMode !== 'uniform' ? params.nuqtaScale : 1) *
+                                        (matchesJoiningNuqtaScope(
+                                          glyph,
+                                          params.joiningNuqtaScope ?? 'all'
+                                        )
+                                          ? (params.joiningNuqtaScale ?? 1)
+                                          : 1)
+                                    )
                                   : dotRadius
                               }
                               shape={shape}

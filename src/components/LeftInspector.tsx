@@ -1,21 +1,28 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
+  ArrowDown,
+  ArrowLeft,
+  ArrowRight,
+  ArrowUp,
   BookmarkPlus,
   Check,
   ChevronDown,
   ChevronRight,
   Download,
+  MoveVertical,
   RotateCcw,
   Sparkles,
   Trash2,
   Upload,
 } from 'lucide-react';
 import {
+  DEFAULT_FONT_PARAMS,
   DotShape,
   FontMetadata,
   FontParams,
   FontPreset,
   GridResolution,
+  JoiningNuqtaScope,
   NuqtaMode,
   RESOLUTION_SPECS,
 } from '../types/font';
@@ -25,12 +32,16 @@ interface LeftInspectorProps {
   metadata: FontMetadata;
   presets: FontPreset[];
   activePresetId: string | null;
+  dottedJoiningCount: number;
   skeletonFontName: string;
   skeletonThreshold: number;
   isSkeletonizing: boolean;
   onSelectPreset: (preset: FontPreset) => void;
   onSavePreset: (name: string) => void;
   onDeletePreset: (id: string) => void;
+  onBulkNudgeJoiningNuqtas: (dr: number, dc: number) => void;
+  onBulkSeparateJoiningNuqtas: () => void;
+  onResetJoiningNuqtas: () => void;
   onChangeParams: (patch: Partial<FontParams>) => void;
   onChangeResolution: (res: GridResolution) => void;
   onChangeMetadata: (patch: Partial<FontMetadata>) => void;
@@ -81,6 +92,7 @@ interface SliderRowProps {
   max: number;
   step: number;
   value: number;
+  defaultValue: number;
   onChange: (val: number) => void;
 }
 
@@ -91,24 +103,36 @@ const SliderRow: React.FC<SliderRowProps> = ({
   max,
   step,
   value,
+  defaultValue,
   onChange,
-}) => (
-  <div className="space-y-1.5">
-    <div className="flex items-center justify-between text-xs">
-      <span className="text-[#A1A1AA]">{label}</span>
-      <span className="font-mono-tech text-[#F5F5F5] text-[11px]">{valueLabel}</span>
+}) => {
+  const handleReset = () => onChange(defaultValue);
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between text-xs">
+        <span className="text-[#A1A1AA] select-none">{label}</span>
+        <span
+          onDoubleClick={handleReset}
+          title="Double-click to reset to default"
+          className="font-mono-tech text-[#F5F5F5] text-[11px] select-none cursor-pointer"
+        >
+          {valueLabel}
+        </span>
+      </div>
+      <input
+        type="range"
+        className="ndot-slider"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        title="Double-click to reset to default"
+        onChange={(e) => onChange(parseFloat(e.target.value))}
+        onDoubleClick={handleReset}
+      />
     </div>
-    <input
-      type="range"
-      className="ndot-slider"
-      min={min}
-      max={max}
-      step={step}
-      value={value}
-      onChange={(e) => onChange(parseFloat(e.target.value))}
-    />
-  </div>
-);
+  );
+};
 
 const DOT_SHAPES: Array<{ id: DotShape; label: string }> = [
   { id: 'circle', label: 'Circle' },
@@ -126,17 +150,28 @@ const NUQTA_MODES: Array<{ id: NuqtaMode; label: string }> = [
 
 const RESOLUTIONS: GridResolution[] = ['7x9', '9x11', '11x13', '13x15'];
 
+const JOINING_SCOPES: Array<{ id: JoiningNuqtaScope; label: string }> = [
+  { id: 'all', label: 'All' },
+  { id: 'init', label: 'Init' },
+  { id: 'medi', label: 'Medi' },
+  { id: 'fina', label: 'Fina' },
+];
+
 export const LeftInspector: React.FC<LeftInspectorProps> = ({
   params,
   metadata,
   presets,
   activePresetId,
+  dottedJoiningCount,
   skeletonFontName,
   skeletonThreshold,
   isSkeletonizing,
   onSelectPreset,
   onSavePreset,
   onDeletePreset,
+  onBulkNudgeJoiningNuqtas,
+  onBulkSeparateJoiningNuqtas,
+  onResetJoiningNuqtas,
   onChangeParams,
   onChangeResolution,
   onChangeMetadata,
@@ -372,6 +407,7 @@ export const LeftInspector: React.FC<LeftInspectorProps> = ({
           max={0.95}
           step={0.01}
           value={params.dotDiameter}
+          defaultValue={DEFAULT_FONT_PARAMS.dotDiameter}
           onChange={(v) => onChangeParams({ dotDiameter: v })}
         />
         <SliderRow
@@ -381,6 +417,7 @@ export const LeftInspector: React.FC<LeftInspectorProps> = ({
           max={1.45}
           step={0.02}
           value={params.dotSpacingX}
+          defaultValue={DEFAULT_FONT_PARAMS.dotSpacingX}
           onChange={(v) => onChangeParams({ dotSpacingX: v })}
         />
         <SliderRow
@@ -390,6 +427,7 @@ export const LeftInspector: React.FC<LeftInspectorProps> = ({
           max={1.45}
           step={0.02}
           value={params.dotSpacingY}
+          defaultValue={DEFAULT_FONT_PARAMS.dotSpacingY}
           onChange={(v) => onChangeParams({ dotSpacingY: v })}
         />
 
@@ -482,6 +520,7 @@ export const LeftInspector: React.FC<LeftInspectorProps> = ({
               max={1.6}
               step={0.02}
               value={params.nuqtaScale}
+              defaultValue={DEFAULT_FONT_PARAMS.nuqtaScale}
               onChange={(v) => onChangeParams({ nuqtaScale: v })}
             />
             <SliderRow
@@ -491,10 +530,134 @@ export const LeftInspector: React.FC<LeftInspectorProps> = ({
               max={1.2}
               step={0.05}
               value={params.nuqtaOffsetY}
+              defaultValue={DEFAULT_FONT_PARAMS.nuqtaOffsetY}
               onChange={(v) => onChangeParams({ nuqtaOffsetY: v })}
             />
           </>
         )}
+      </InspectorSection>
+
+      {/* 2B. Bulk Joining-Glyph Nuqta Operations */}
+      <InspectorSection title="Bulk Joining Nuqtas" defaultOpen={true}>
+        <div className="flex items-center justify-between text-[11px] font-mono-tech text-[#8E8E93]">
+          <span>Target Scope</span>
+          <span className="text-[#F5F5F5]">{dottedJoiningCount} dotted glyphs</span>
+        </div>
+
+        <div className="grid grid-cols-4 gap-1 bg-[#0E0E10] p-1 border border-[#262626]">
+          {JOINING_SCOPES.map((s) => {
+            const active = (params.joiningNuqtaScope ?? 'all') === s.id;
+            return (
+              <button
+                key={s.id}
+                type="button"
+                onClick={() => onChangeParams({ joiningNuqtaScope: s.id })}
+                className={`py-1 text-[11px] font-mono-tech whitespace-nowrap transition-colors ${
+                  active
+                    ? 'bg-[#D71921] text-white font-medium'
+                    : 'text-[#A1A1AA] hover:text-[#F5F5F5] hover:bg-[#1B1B1F]'
+                }`}
+              >
+                {s.label}
+              </button>
+            );
+          })}
+        </div>
+
+        <SliderRow
+          label="Joining Nuqta Scale"
+          valueLabel={`${(params.joiningNuqtaScale ?? 1).toFixed(2)}×`}
+          min={0.7}
+          max={1.5}
+          step={0.02}
+          value={params.joiningNuqtaScale ?? 1}
+          defaultValue={DEFAULT_FONT_PARAMS.joiningNuqtaScale}
+          onChange={(v) => onChangeParams({ joiningNuqtaScale: v })}
+        />
+        <SliderRow
+          label="Extra Vertical Offset"
+          valueLabel={`${(params.joiningNuqtaOffsetY ?? 0) >= 0 ? '+' : ''}${(params.joiningNuqtaOffsetY ?? 0).toFixed(2)} cells`}
+          min={-1.0}
+          max={1.5}
+          step={0.05}
+          value={params.joiningNuqtaOffsetY ?? 0}
+          defaultValue={DEFAULT_FONT_PARAMS.joiningNuqtaOffsetY}
+          onChange={(v) => onChangeParams({ joiningNuqtaOffsetY: v })}
+        />
+        <SliderRow
+          label="Horizontal Offset"
+          valueLabel={`${(params.joiningNuqtaOffsetX ?? 0) >= 0 ? '+' : ''}${(params.joiningNuqtaOffsetX ?? 0).toFixed(2)} cells`}
+          min={-1.0}
+          max={1.0}
+          step={0.05}
+          value={params.joiningNuqtaOffsetX ?? 0}
+          defaultValue={DEFAULT_FONT_PARAMS.joiningNuqtaOffsetX}
+          onChange={(v) => onChangeParams({ joiningNuqtaOffsetX: v })}
+        />
+
+        <div className="space-y-1.5 pt-1">
+          <div className="flex items-center justify-between text-xs">
+            <span className="text-[#A1A1AA]">Batch Cell Reposition</span>
+            <span className="font-mono-tech text-[10px] text-[#71717A]">1-cell step</span>
+          </div>
+          <div className="grid grid-cols-4 gap-1">
+            <button
+              type="button"
+              onClick={() => onBulkNudgeJoiningNuqtas(0, -1)}
+              title="Shift nuqtas left by 1 cell on joining glyphs"
+              className="flex items-center justify-center py-1.5 bg-[#1B1B1F] hover:bg-[#26262A] text-[#F5F5F5] border border-[#2E2E33] transition-colors"
+              aria-label="Shift joining nuqtas left"
+            >
+              <ArrowLeft className="w-3.5 h-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => onBulkNudgeJoiningNuqtas(-1, 0)}
+              title="Shift nuqtas up by 1 cell on joining glyphs"
+              className="flex items-center justify-center py-1.5 bg-[#1B1B1F] hover:bg-[#26262A] text-[#F5F5F5] border border-[#2E2E33] transition-colors"
+              aria-label="Shift joining nuqtas up"
+            >
+              <ArrowUp className="w-3.5 h-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => onBulkNudgeJoiningNuqtas(1, 0)}
+              title="Shift nuqtas down by 1 cell on joining glyphs"
+              className="flex items-center justify-center py-1.5 bg-[#1B1B1F] hover:bg-[#26262A] text-[#F5F5F5] border border-[#2E2E33] transition-colors"
+              aria-label="Shift joining nuqtas down"
+            >
+              <ArrowDown className="w-3.5 h-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => onBulkNudgeJoiningNuqtas(0, 1)}
+              title="Shift nuqtas right by 1 cell on joining glyphs"
+              className="flex items-center justify-center py-1.5 bg-[#1B1B1F] hover:bg-[#26262A] text-[#F5F5F5] border border-[#2E2E33] transition-colors"
+              aria-label="Shift joining nuqtas right"
+            >
+              <ArrowRight className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-1.5 pt-0.5">
+          <button
+            type="button"
+            onClick={onBulkSeparateJoiningNuqtas}
+            className="flex items-center justify-center gap-1.5 py-1.5 px-2 text-xs font-medium bg-[#1B1B1F] hover:bg-[#26262A] text-[#F5F5F5] border border-[#2E2E33] whitespace-nowrap transition-colors"
+          >
+            <MoveVertical className="w-3 h-3 text-[#D71921]" />
+            <span>Auto-Clearance</span>
+          </button>
+          <button
+            type="button"
+            onClick={onResetJoiningNuqtas}
+            className="flex items-center justify-center gap-1.5 py-1.5 px-2 text-xs text-[#A1A1AA] hover:text-[#F5F5F5] border border-[#262626] hover:border-[#3F3F46] whitespace-nowrap transition-colors"
+          >
+            <RotateCcw className="w-3 h-3" />
+            <span>Reset Joining</span>
+          </button>
+        </div>
       </InspectorSection>
 
       {/* 3. Stroke, Baseline & Spacing */}
@@ -506,6 +669,7 @@ export const LeftInspector: React.FC<LeftInspectorProps> = ({
           max={2}
           step={0.5}
           value={params.baselineOffset}
+          defaultValue={DEFAULT_FONT_PARAMS.baselineOffset}
           onChange={(v) => onChangeParams({ baselineOffset: v })}
         />
         <SliderRow
@@ -515,6 +679,7 @@ export const LeftInspector: React.FC<LeftInspectorProps> = ({
           max={1}
           step={1}
           value={params.joinRowOffset}
+          defaultValue={DEFAULT_FONT_PARAMS.joinRowOffset}
           onChange={(v) => onChangeParams({ joinRowOffset: v })}
         />
         <SliderRow
@@ -524,6 +689,7 @@ export const LeftInspector: React.FC<LeftInspectorProps> = ({
           max={2.0}
           step={0.1}
           value={params.tracking}
+          defaultValue={DEFAULT_FONT_PARAMS.tracking}
           onChange={(v) => onChangeParams({ tracking: v })}
         />
         <SliderRow
@@ -533,6 +699,7 @@ export const LeftInspector: React.FC<LeftInspectorProps> = ({
           max={7}
           step={0.5}
           value={params.wordSpacing}
+          defaultValue={DEFAULT_FONT_PARAMS.wordSpacing}
           onChange={(v) => onChangeParams({ wordSpacing: v })}
         />
 
@@ -593,6 +760,7 @@ export const LeftInspector: React.FC<LeftInspectorProps> = ({
           max={180}
           step={4}
           value={skeletonThreshold}
+          defaultValue={96}
           onChange={onChangeThreshold}
         />
 

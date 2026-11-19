@@ -81,6 +81,8 @@ export interface GlyphData {
   isCustomized?: boolean;
 }
 
+export type JoiningNuqtaScope = 'all' | 'init' | 'medi' | 'fina';
+
 export interface FontParams {
   dotDiameter: number;      // 0.20 .. 0.95 of cell pitch
   dotSpacingX: number;      // 0.75 .. 1.45 multiplier
@@ -90,6 +92,10 @@ export interface FontParams {
   nuqtaMode: NuqtaMode;
   nuqtaScale: number;       // 0.80 .. 1.60 relative to dotDiameter
   nuqtaOffsetY: number;     // -0.60 .. +1.20 cells extra vertical clearance away from stroke
+  joiningNuqtaScope: JoiningNuqtaScope;
+  joiningNuqtaScale: number;   // 0.70 .. 1.50 additional scale multiplier for joining glyphs
+  joiningNuqtaOffsetX: number; // -1.00 .. +1.00 horizontal shift in cells for joining glyphs
+  joiningNuqtaOffsetY: number; // -1.00 .. +1.50 extra vertical clearance in cells for joining glyphs
   baselineOffset: number;   // -2 .. +2 grid rows shift
   joinRowOffset: number;    // -1 .. +1 grid rows shift for cursive alignment
   tracking: number;         // -0.5 .. +2.0 grid columns between non-joining glyphs
@@ -135,6 +141,10 @@ export const DEFAULT_FONT_PARAMS: FontParams = {
   nuqtaMode: 'clearance_large',
   nuqtaScale: 1.18,
   nuqtaOffsetY: 0.35,
+  joiningNuqtaScope: 'all',
+  joiningNuqtaScale: 1.0,
+  joiningNuqtaOffsetX: 0,
+  joiningNuqtaOffsetY: 0,
   baselineOffset: 0,
   joinRowOffset: 0,
   tracking: 0.4,

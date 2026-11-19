@@ -139,7 +139,7 @@ export const PlaygroundView: React.FC<PlaygroundViewProps> = ({
         {/* Right: Font Size + ZWNJ + Surface Theme */}
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-2.5 w-44">
-            <span className="text-xs text-[#8E8E93] whitespace-nowrap">Size</span>
+            <span className="text-xs text-[#8E8E93] whitespace-nowrap select-none">Size</span>
             <input
               type="range"
               className="ndot-slider"
@@ -147,10 +147,16 @@ export const PlaygroundView: React.FC<PlaygroundViewProps> = ({
               max={120}
               step={2}
               value={fontSize}
+              title="Double-click to reset to 56px"
               onChange={(e) => setFontSize(Number(e.target.value))}
+              onDoubleClick={() => setFontSize(56)}
               aria-label="Preview font size"
             />
-            <span className="font-mono-tech text-[11px] text-[#F5F5F5] w-10 text-right shrink-0">
+            <span
+              onDoubleClick={() => setFontSize(56)}
+              title="Double-click to reset to 56px"
+              className="font-mono-tech text-[11px] text-[#F5F5F5] w-10 text-right shrink-0 select-none cursor-pointer"
+            >
               {fontSize}px
             </span>
           </div>

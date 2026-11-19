@@ -1,7 +1,9 @@
 import {
+  CellType,
   DotShape,
   FontParams,
   GlyphData,
+  JoiningNuqtaScope,
   RESOLUTION_SPECS,
 } from '../types/font';
 
@@ -309,18 +311,25 @@ export function computeGlyphDots(
       } else {
         // Cell === 2: Persian Nuqta (diacritic dot)
         const dir = r < refRow ? -1 : 1; // -1 pushes upward (smaller row), +1 pushes downward (larger row)
+        const applyJoining = matchesJoiningNuqtaScope(
+          glyph,
+          params.joiningNuqtaScope ?? 'all'
+        );
+        const jScale = applyJoining ? (params.joiningNuqtaScale ?? 1) : 1;
+        const jOffX = applyJoining ? (params.joiningNuqtaOffsetX ?? 0) : 0;
+        const jOffY = applyJoining ? (params.joiningNuqtaOffsetY ?? 0) : 0;
 
         if (params.nuqtaMode === 'uniform') {
           dots.push({
-            cx: xCenter,
-            cy: yCenter,
-            radius: baseRadius,
+            cx: xCenter + jOffX,
+            cy: yCenter + dir * jOffY,
+            radius: Math.min(0.72, Math.max(0.12, baseRadius * jScale)),
             shape: params.dotShape,
             isNuqta: true,
           });
         } else if (params.nuqtaMode === 'cluster_2x2') {
-          const shiftY = dir * params.nuqtaOffsetY;
-          const subR = Math.min(0.45, baseRadius * 0.54 * params.nuqtaScale);
+          const shiftY = dir * (params.nuqtaOffsetY + jOffY);
+          const subR = Math.min(0.48, Math.max(0.1, baseRadius * 0.54 * params.nuqtaScale * jScale));
           const off = Math.max(0.18, subR * 1.05);
           const offsets: [number, number][] = [
             [-off, -off],
@@ -330,7 +339,7 @@ export function computeGlyphDots(
           ];
           for (const [dx, dy] of offsets) {
             dots.push({
-              cx: xCenter + dx,
+              cx: xCenter + jOffX + dx,
               cy: yCenter + shiftY + dy,
               radius: subR,
               shape: params.dotShape,
@@ -339,12 +348,12 @@ export function computeGlyphDots(
           }
         } else {
           // 'clearance_large' or 'diamond'
-          const shiftY = dir * params.nuqtaOffsetY;
-          const nRadius = Math.min(0.68, baseRadius * params.nuqtaScale);
+          const shiftY = dir * (params.nuqtaOffsetY + jOffY);
+          const nRadius = Math.min(0.72, Math.max(0.12, baseRadius * params.nuqtaScale * jScale));
           const nShape: DotShape =
             params.nuqtaMode === 'diamond' ? 'diamond' : params.dotShape;
           dots.push({
-            cx: xCenter,
+            cx: xCenter + jOffX,
             cy: yCenter + shiftY,
             radius: nRadius,
             shape: nShape,
@@ -361,6 +370,179 @@ export function computeGlyphDots(
     rightBearingCols: effectiveRight,
     totalAdvanceCols,
   };
+}
+
+export function matchesJoiningNuqtaScope(
+  glyph: GlyphData,
+  scope: JoiningNuqtaScope
+): boolean {
+  if (!glyph.joinsLeft && !glyph.joinsRight) return false;
+  if (scope === 'all') return true;
+  return glyph.contextualForm === scope;
+}
+
+export function glyphHasNuqtas(glyph: GlyphData): boolean {
+  for (let r = 0; r < glyph.rows; r++) {
+    for (let c = 0; c < glyph.cols; c++) {
+      if (glyph.cells[r]?.[c] === 2) return true;
+    }
+  }
+  return false;
+}
+
+export function countDottedJoiningGlyphs(
+  library: Record<string, GlyphData>,
+  scope: JoiningNuqtaScope
+): number {
+  let count = 0;
+  for (const g of Object.values(library)) {
+    if (matchesJoiningNuqtaScope(g, scope) && glyphHasNuqtas(g)) {
+      count++;
+    }
+  }
+  return count;
+}
+
+/**
+ * Bulk-shifts all nuqta cells (CellType = 2) by (dr, dc) across joining glyphs matching scope,
+ * ensuring nuqtas stay inside grid bounds and never overwrite base stroke dots (CellType = 1).
+ */
+export function bulkNudgeJoiningNuqtas(
+  library: Record<string, GlyphData>,
+  scope: JoiningNuqtaScope,
+  dr: number,
+  dc: number
+): { nextLibrary: Record<string, GlyphData>; movedCount: number; skippedCount: number } {
+  const nextLibrary: Record<string, GlyphData> = { ...library };
+  let movedCount = 0;
+  let skippedCount = 0;
+
+  for (const [id, glyph] of Object.entries(library)) {
+    if (!matchesJoiningNuqtaScope(glyph, scope)) continue;
+
+    const nuqtas: Array<[number, number]> = [];
+    for (let r = 0; r < glyph.rows; r++) {
+      for (let c = 0; c < glyph.cols; c++) {
+        if (glyph.cells[r]?.[c] === 2) nuqtas.push([r, c]);
+      }
+    }
+    if (nuqtas.length === 0) continue;
+
+    // Validate all destination cells are in-bounds and do not collide with stroke dots
+    const canMove = nuqtas.every(([r, c]) => {
+      const nr = r + dr;
+      const nc = c + dc;
+      if (nr < 0 || nr >= glyph.rows || nc < 0 || nc >= glyph.cols) return false;
+      return glyph.cells[nr][nc] !== 1;
+    });
+
+    if (!canMove) {
+      skippedCount++;
+      continue;
+    }
+
+    const nextCells: CellType[][] = glyph.cells.map((row) =>
+      row.map((cell) => (cell === 2 ? 0 : cell))
+    );
+    let maxCol = glyph.advanceCols;
+    for (const [r, c] of nuqtas) {
+      nextCells[r + dr][c + dc] = 2;
+      if (c + dc + 1 > maxCol) maxCol = c + dc + 1;
+    }
+
+    nextLibrary[id] = {
+      ...glyph,
+      cells: nextCells,
+      advanceCols: Math.min(glyph.cols, maxCol),
+      isCustomized: true,
+    };
+    movedCount++;
+  }
+
+  return { nextLibrary, movedCount, skippedCount };
+}
+
+/**
+ * Automatically ensures at least 1 empty row of vertical clearance between structural strokes
+ * and nuqta clusters across all joining glyphs matching scope.
+ */
+export function bulkSeparateJoiningNuqtas(
+  library: Record<string, GlyphData>,
+  scope: JoiningNuqtaScope,
+  joinRow: number
+): { nextLibrary: Record<string, GlyphData>; adjustedCount: number } {
+  const nextLibrary: Record<string, GlyphData> = { ...library };
+  let adjustedCount = 0;
+
+  for (const [id, glyph] of Object.entries(library)) {
+    if (!matchesJoiningNuqtaScope(glyph, scope)) continue;
+
+    const nuqtas: Array<[number, number]> = [];
+    let strokeRowSum = 0;
+    let strokeCount = 0;
+    for (let r = 0; r < glyph.rows; r++) {
+      for (let c = 0; c < glyph.cols; c++) {
+        const cell = glyph.cells[r]?.[c] ?? 0;
+        if (cell === 2) nuqtas.push([r, c]);
+        else if (cell === 1) {
+          strokeRowSum += r;
+          strokeCount++;
+        }
+      }
+    }
+    if (nuqtas.length === 0) continue;
+
+    const refRow = strokeCount > 0 ? strokeRowSum / strokeCount : joinRow;
+    const avgNuqtaRow =
+      nuqtas.reduce((acc, [r]) => acc + r, 0) / nuqtas.length;
+    const dir = avgNuqtaRow < refRow ? -1 : 1;
+
+    // Check whether any nuqta touches (within 1 row) a stroke dot in nearby columns
+    const needsSeparation = nuqtas.some(([nr, nc]) => {
+      for (let dr = -1; dr <= 1; dr++) {
+        for (let dc = -1; dc <= 1; dc++) {
+          const sr = nr + dr;
+          const sc = nc + dc;
+          if (
+            sr >= 0 &&
+            sr < glyph.rows &&
+            sc >= 0 &&
+            sc < glyph.cols &&
+            glyph.cells[sr][sc] === 1
+          ) {
+            return true;
+          }
+        }
+      }
+      return false;
+    });
+
+    if (!needsSeparation) continue;
+
+    const canShift = nuqtas.every(([r, c]) => {
+      const nr = r + dir;
+      if (nr < 0 || nr >= glyph.rows) return false;
+      return glyph.cells[nr][c] !== 1;
+    });
+
+    if (!canShift) continue;
+
+    const nextCells: CellType[][] = glyph.cells.map((row) =>
+      row.map((cell) => (cell === 2 ? 0 : cell))
+    );
+    for (const [r, c] of nuqtas) {
+      nextCells[r + dir][c] = 2;
+    }
+
+    nextLibrary[id] = {
+      ...glyph,
+      cells: nextCells,
+      isCustomized: true,
+    };
+    adjustedCount++;
+  }
+
+  return { nextLibrary, adjustedCount };
 }
 
 export function getContextualSampleWord(glyph: GlyphData): string {

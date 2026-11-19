@@ -1,7 +1,8 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Download } from 'lucide-react';
 import {
   BUILT_IN_PRESETS,
+  CellType,
   DEFAULT_FONT_METADATA,
   DEFAULT_FONT_PARAMS,
   FontMetadata,
@@ -19,6 +20,12 @@ import {
   resampleGlyphToResolution,
   skeletonizeGlyphFromFont,
 } from './engine/skeletonizer';
+import {
+  bulkNudgeJoiningNuqtas,
+  bulkSeparateJoiningNuqtas,
+  countDottedJoiningGlyphs,
+  matchesJoiningNuqtaScope,
+} from './engine/shaper';
 import { compileNdotTtf } from './engine/ttfCompiler';
 import { LeftInspector } from './components/LeftInspector';
 import { PlaygroundView } from './components/PlaygroundView';
@@ -307,6 +314,95 @@ export default function App() {
     },
     [showToast]
   );
+
+  const dottedJoiningCount = useMemo(
+    () => countDottedJoiningGlyphs(library, params.joiningNuqtaScope ?? 'all'),
+    [library, params.joiningNuqtaScope]
+  );
+
+  const handleBulkNudgeJoiningNuqtas = useCallback(
+    (dr: number, dc: number) => {
+      const scope = params.joiningNuqtaScope ?? 'all';
+      const { nextLibrary, movedCount, skippedCount } = bulkNudgeJoiningNuqtas(
+        library,
+        scope,
+        dr,
+        dc
+      );
+      if (movedCount === 0) {
+        showToast(
+          'No joining nuqtas could move further without hitting bounds or base strokes',
+          true
+        );
+        return;
+      }
+      setLibrary(nextLibrary);
+      const dirLabel =
+        dr < 0 ? 'up' : dr > 0 ? 'down' : dc < 0 ? 'left' : 'right';
+      const suffix = skippedCount > 0 ? ` (${skippedCount} kept clear of strokes)` : '';
+      showToast(`Shifted nuqtas ${dirLabel} across ${movedCount} joining glyphs${suffix}`);
+    },
+    [library, params.joiningNuqtaScope, showToast]
+  );
+
+  const handleBulkSeparateJoiningNuqtas = useCallback(() => {
+    const scope = params.joiningNuqtaScope ?? 'all';
+    const spec = RESOLUTION_SPECS[params.gridResolution];
+    const joinRow = spec.joinRow + params.joinRowOffset;
+    const { nextLibrary, adjustedCount } = bulkSeparateJoiningNuqtas(
+      library,
+      scope,
+      joinRow
+    );
+    if (adjustedCount === 0) {
+      showToast('All joining nuqtas already have clear separation from base strokes');
+      return;
+    }
+    setLibrary(nextLibrary);
+    showToast(`Increased stroke clearance on ${adjustedCount} joining glyphs`);
+  }, [library, params.joiningNuqtaScope, params.gridResolution, params.joinRowOffset, showToast]);
+
+  const handleResetJoiningNuqtas = useCallback(() => {
+    const scope = params.joiningNuqtaScope ?? 'all';
+    const masters = createDefaultGlyphLibrary();
+
+    setParams((prev) => ({
+      ...prev,
+      joiningNuqtaScale: 1.0,
+      joiningNuqtaOffsetX: 0,
+      joiningNuqtaOffsetY: 0,
+    }));
+    setActivePresetId(null);
+
+    setLibrary((prev) => {
+      const nextLib: Record<string, GlyphData> = { ...prev };
+      for (const [id, glyph] of Object.entries(prev)) {
+        if (!matchesJoiningNuqtaScope(glyph, scope)) continue;
+        const base = masters[id];
+        if (!base) continue;
+        const ref =
+          params.gridResolution === '9x11'
+            ? base
+            : resampleGlyphToResolution(base, params.gridResolution);
+
+        // Preserve user's base stroke dots (1) while restoring master nuqta positions (2)
+        const restoredCells: CellType[][] = glyph.cells.map((row, r) =>
+          row.map((cell, c) => {
+            if (cell === 1) return 1;
+            return ref.cells[r]?.[c] === 2 ? 2 : 0;
+          })
+        );
+        nextLib[id] = {
+          ...glyph,
+          cells: restoredCells,
+        };
+      }
+      return nextLib;
+    });
+
+    const scopeLabel = scope === 'all' ? 'all joining' : `${scope} joining`;
+    showToast(`Reset nuqta scale and positions for ${scopeLabel} glyphs`);
+  }, [params.joiningNuqtaScope, params.gridResolution, showToast]);
 
   const handleChangeMetadata = useCallback((patch: Partial<FontMetadata>) => {
     setMetadata((prev) => ({ ...prev, ...patch }));
@@ -603,12 +699,16 @@ export default function App() {
           metadata={metadata}
           presets={allPresets}
           activePresetId={activePresetId}
+          dottedJoiningCount={dottedJoiningCount}
           skeletonFontName={skeletonFontLabel}
           skeletonThreshold={skeletonThreshold}
           isSkeletonizing={isSkeletonizing}
           onSelectPreset={handleSelectPreset}
           onSavePreset={handleSavePreset}
           onDeletePreset={handleDeletePreset}
+          onBulkNudgeJoiningNuqtas={handleBulkNudgeJoiningNuqtas}
+          onBulkSeparateJoiningNuqtas={handleBulkSeparateJoiningNuqtas}
+          onResetJoiningNuqtas={handleResetJoiningNuqtas}
           onChangeParams={handleChangeParams}
           onChangeResolution={handleChangeResolution}
           onChangeMetadata={handleChangeMetadata}

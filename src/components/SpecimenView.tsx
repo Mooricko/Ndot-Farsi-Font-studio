@@ -50,7 +50,13 @@ export const SpecimenView: React.FC<SpecimenViewProps> = ({
 
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-2.5 w-40">
-            <span className="text-xs text-[#8E8E93] whitespace-nowrap">Scale</span>
+            <span
+              onDoubleClick={() => setTileScale(52)}
+              title="Double-click to reset to default scale"
+              className="text-xs text-[#8E8E93] whitespace-nowrap select-none cursor-pointer"
+            >
+              Scale
+            </span>
             <input
               type="range"
               className="ndot-slider"
@@ -58,7 +64,9 @@ export const SpecimenView: React.FC<SpecimenViewProps> = ({
               max={84}
               step={4}
               value={tileScale}
+              title="Double-click to reset to default scale"
               onChange={(e) => setTileScale(Number(e.target.value))}
+              onDoubleClick={() => setTileScale(52)}
               aria-label="Specimen glyph scale"
             />
           </div>
