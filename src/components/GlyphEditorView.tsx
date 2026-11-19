@@ -1,10 +1,12 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   ArrowDown,
   ArrowLeft,
   ArrowRight,
   ArrowUp,
+  Copy,
   Eraser,
+  Link2,
   Minus,
   Plus,
   Redo2,
@@ -22,16 +24,28 @@ import {
   getContextualSampleWord,
   matchesJoiningNuqtaScope,
 } from '../engine/shaper';
-import { SvgDotShape, VectorLineSvg } from './DotSvgRenderer';
+import { getLetterFamilyGlyphs } from '../engine/formSync';
+import { renderSkeletonSketchToCanvas } from '../engine/skeletonizer';
+import { GlyphMiniSvg, SvgDotShape, VectorLineSvg } from './DotSvgRenderer';
 
 interface GlyphEditorViewProps {
   glyph: GlyphData;
   library: Record<string, GlyphData>;
   params: FontParams;
   liveFontFamily: string | null;
+  syncLetterForms: boolean;
+  showSkeletonGuide: boolean;
+  skeletonFontFamily: string;
+  skeletonFontLabel: string;
+  skeletonThreshold: number;
   canUndo: boolean;
   canRedo: boolean;
+  onToggleSyncLetterForms: () => void;
+  onToggleSkeletonGuide: (show: boolean) => void;
+  onSelectGlyph: (id: string) => void;
   onUpdateGlyph: (updated: GlyphData) => void;
+  onNudgeGlyph: (dr: number, dc: number) => void;
+  onCloneShapeToAllForms: () => void;
   onUndo: () => void;
   onRedo: () => void;
   onResetGlyph: () => void;
@@ -43,9 +57,19 @@ export const GlyphEditorView: React.FC<GlyphEditorViewProps> = ({
   library,
   params,
   liveFontFamily,
+  syncLetterForms,
+  showSkeletonGuide,
+  skeletonFontFamily,
+  skeletonFontLabel,
+  skeletonThreshold,
   canUndo,
   canRedo,
+  onToggleSyncLetterForms,
+  onToggleSkeletonGuide,
+  onSelectGlyph,
   onUpdateGlyph,
+  onNudgeGlyph,
+  onCloneShapeToAllForms,
   onUndo,
   onRedo,
   onResetGlyph,
@@ -54,9 +78,49 @@ export const GlyphEditorView: React.FC<GlyphEditorViewProps> = ({
   const [brushMode, setBrushMode] = useState<'stroke' | 'nuqta'>('stroke');
   const [paintValue, setPaintValue] = useState<CellType | null>(null);
   const [hoverCoord, setHoverCoord] = useState<{ r: number; c: number } | null>(null);
+  const [fontsReadyRev, setFontsReadyRev] = useState<number>(0);
+  const skeletonCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   const spec = RESOLUTION_SPECS[params.gridResolution];
   const joinRow = Math.max(0, Math.min(glyph.rows - 1, spec.joinRow + params.joinRowOffset));
+  const cellPixelSize = glyph.rows <= 9 ? 44 : glyph.rows <= 11 ? 38 : glyph.rows <= 13 ? 32 : 28;
+
+  // Refresh reference sketch once web fonts (e.g. Vazirmatn) finish loading
+  useEffect(() => {
+    let active = true;
+    document.fonts?.ready.then(() => {
+      if (active) setFontsReadyRev((n) => n + 1);
+    });
+    return () => {
+      active = false;
+    };
+  }, [skeletonFontFamily]);
+
+  // Render original base-font skeleton sketch behind the matrix grid when enabled
+  useEffect(() => {
+    if (!showSkeletonGuide || !skeletonCanvasRef.current) return;
+    renderSkeletonSketchToCanvas(
+      skeletonCanvasRef.current,
+      glyph,
+      skeletonFontFamily,
+      params.gridResolution,
+      cellPixelSize,
+      params.joinRowOffset,
+      skeletonThreshold
+    );
+  }, [
+    showSkeletonGuide,
+    glyph.id,
+    glyph.cols,
+    glyph.rows,
+    glyph.advanceCols,
+    skeletonFontFamily,
+    params.gridResolution,
+    cellPixelSize,
+    params.joinRowOffset,
+    skeletonThreshold,
+    fontsReadyRev,
+  ]);
 
   const applyCell = (r: number, c: number, val: CellType) => {
     if (r < 0 || r >= glyph.rows || c < 0 || c >= glyph.cols) return;
@@ -103,22 +167,11 @@ export const GlyphEditorView: React.FC<GlyphEditorViewProps> = ({
   };
 
   const nudgeCells = (dr: number, dc: number) => {
-    const nextCells: CellType[][] = Array.from({ length: glyph.rows }, (_, r) =>
-      Array.from({ length: glyph.cols }, (_, c) => {
-        const sr = r - dr;
-        const sc = c - dc;
-        if (sr >= 0 && sr < glyph.rows && sc >= 0 && sc < glyph.cols) {
-          return glyph.cells[sr][sc];
-        }
-        return 0;
-      })
-    );
-    onUpdateGlyph({
-      ...glyph,
-      cells: nextCells,
-      isCustomized: true,
-    });
+    onNudgeGlyph(dr, dc);
   };
+
+  const letterFamily = getLetterFamilyGlyphs(library, glyph);
+  const hasMultipleForms = letterFamily.length > 1;
 
   const clearGlyph = () => {
     const empty: CellType[][] = Array.from({ length: glyph.rows }, () =>
@@ -162,8 +215,6 @@ export const GlyphEditorView: React.FC<GlyphEditorViewProps> = ({
       ? `${contextSample}   س${glyph.baseLetter}م   ت${glyph.baseLetter}ا`
       : `${glyph.char}  ${glyph.char}${glyph.char}`;
 
-  const cellPixelSize = glyph.rows <= 9 ? 44 : glyph.rows <= 11 ? 38 : glyph.rows <= 13 ? 32 : 28;
-
   return (
     <div
       className="flex flex-col h-full bg-[#0E0E10] select-none"
@@ -193,8 +244,25 @@ export const GlyphEditorView: React.FC<GlyphEditorViewProps> = ({
           </div>
         </div>
 
-        {/* Brush Selector */}
-        <div className="flex items-center gap-2">
+        {/* Skeleton Guide Toggle & Brush Selector */}
+        <div className="flex items-center gap-3">
+          <label
+            title={`Show original ${skeletonFontLabel} skeleton centerline behind the grid as a tracing guide`}
+            className={`flex items-center gap-2 px-2.5 py-1.5 text-xs font-medium border whitespace-nowrap cursor-pointer transition-colors ${
+              showSkeletonGuide
+                ? 'bg-[#38BDF8]/10 border-[#38BDF8]/60 text-[#E0F2FE]'
+                : 'bg-[#0E0E10] border-[#262626] text-[#A1A1AA] hover:text-[#F5F5F5] hover:border-[#3F3F46]'
+            }`}
+          >
+            <input
+              type="checkbox"
+              checked={showSkeletonGuide}
+              onChange={(e) => onToggleSkeletonGuide(e.target.checked)}
+              className="w-3.5 h-3.5 accent-[#38BDF8] cursor-pointer"
+            />
+            <span>Skeleton Guide</span>
+          </label>
+
           <div className="flex items-center bg-[#0E0E10] p-0.5 border border-[#262626]">
             <button
               type="button"
@@ -221,6 +289,77 @@ export const GlyphEditorView: React.FC<GlyphEditorViewProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Universal Letter-Form Sync & Sibling Strip (for multi-form Persian letters like ع) */}
+      {hasMultipleForms && (
+        <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-2 border-b border-[#262626] bg-[#101013]">
+          <div className="flex items-center gap-2 overflow-x-auto ndot-scroll">
+            <span className="text-[11px] font-mono-tech text-[#8E8E93] whitespace-nowrap shrink-0">
+              Forms of <span className="font-farsi-ref text-xs text-[#F5F5F5]">{glyph.baseLetter}</span>
+            </span>
+            <div className="flex items-center gap-1.5">
+              {letterFamily.map((sib) => {
+                const isCurrent = sib.id === glyph.id;
+                const formLabel =
+                  sib.contextualForm === 'isol'
+                    ? 'Isol'
+                    : sib.contextualForm === 'init'
+                      ? 'Init'
+                      : sib.contextualForm === 'medi'
+                        ? 'Medi'
+                        : 'Fina';
+                return (
+                  <button
+                    key={sib.id}
+                    type="button"
+                    onClick={() => onSelectGlyph(sib.id)}
+                    title={`Switch to ${sib.name}`}
+                    className={`flex items-center gap-2 px-2 py-1 border transition-colors whitespace-nowrap shrink-0 ${
+                      isCurrent
+                        ? 'border-[#D71921] bg-[#1C1C21] text-[#F5F5F5]'
+                        : syncLetterForms
+                          ? 'border-[#D71921]/40 bg-[#141417] text-[#D4D4D8] hover:border-[#D71921]'
+                          : 'border-[#262626] bg-[#141417] text-[#A1A1AA] hover:border-[#3F3F46] hover:text-[#F5F5F5]'
+                    }`}
+                  >
+                    <GlyphMiniSvg glyph={sib} params={params} size={18} dotColor="#F5F5F5" />
+                    <span className="font-mono-tech text-[10px]">{formLabel}</span>
+                    <span className="font-farsi-ref text-xs opacity-75">{sib.char}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              role="switch"
+              aria-checked={syncLetterForms}
+              onClick={onToggleSyncLetterForms}
+              title="When enabled, edits to any form universally update all contextual forms of this letter"
+              className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium border whitespace-nowrap transition-colors ${
+                syncLetterForms
+                  ? 'bg-[#D71921] border-[#D71921] text-white'
+                  : 'bg-[#18181C] border-[#2E2E33] text-[#D4D4D8] hover:border-[#52525B]'
+              }`}
+            >
+              <Link2 className="w-3.5 h-3.5" />
+              <span>Sync All Forms</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={onCloneShapeToAllForms}
+              title={`Copy this exact glyph matrix across all ${letterFamily.length} forms of ${glyph.baseLetter} with auto cursive joins`}
+              className="flex items-center gap-1.5 px-2.5 py-1 text-xs text-[#A1A1AA] hover:text-[#F5F5F5] bg-[#141417] hover:bg-[#1E1E24] border border-[#262626] whitespace-nowrap transition-colors"
+            >
+              <Copy className="w-3 h-3" />
+              <span>Copy to All</span>
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Edit Actions & Advance Width Bar */}
       <div className="flex flex-wrap items-center justify-between gap-2 px-5 py-2 border-b border-[#262626] bg-[#111114]">
@@ -372,101 +511,125 @@ export const GlyphEditorView: React.FC<GlyphEditorViewProps> = ({
               className="relative border border-[#2C2C31] bg-[#0B0B0D]"
               onContextMenu={(e) => e.preventDefault()}
             >
-              {glyph.cells.map((row, r) => (
-                <div key={r} className="flex">
-                  {row.map((cell, c) => {
-                    const outsideAdvance = c >= glyph.advanceCols;
-                    const isJoinCell = r === joinRow;
-                    const isJoinAnchor =
-                      isJoinCell &&
-                      ((glyph.joinsLeft && c === 0) ||
-                        (glyph.joinsRight && c === glyph.advanceCols - 1));
-                    const dotRadius = (cellPixelSize * params.dotDiameter) * 0.44;
-                    const shape =
-                      cell === 2 && params.nuqtaMode === 'diamond'
-                        ? 'diamond'
-                        : params.dotShape;
+              {/* Original Skeleton Sketch Reference Overlay (behind grid & dots) */}
+              {showSkeletonGuide && (
+                <canvas
+                  ref={skeletonCanvasRef}
+                  aria-hidden="true"
+                  style={{
+                    width: glyph.cols * cellPixelSize,
+                    height: glyph.rows * cellPixelSize,
+                  }}
+                  className="pointer-events-none absolute inset-0 z-0"
+                />
+              )}
 
-                    return (
-                      <button
-                        key={c}
-                        type="button"
-                        onPointerDown={(e) => handleCellPointerDown(e, r, c)}
-                        onPointerEnter={() => handleCellPointerEnter(r, c)}
-                        style={{
-                          width: cellPixelSize,
-                          height: cellPixelSize,
-                        }}
-                        className={`relative flex items-center justify-center border-r border-b border-[#1D1D22] transition-colors cursor-crosshair focus:outline-none ${
-                          outsideAdvance
-                            ? 'bg-[#08080A] opacity-40'
-                            : isJoinCell
-                              ? 'bg-[#D71921]/[0.05] hover:bg-[#1C1C22]'
-                              : 'hover:bg-[#17171C]'
-                        }`}
-                        aria-label={`Row ${r} Column ${c}`}
-                      >
-                        {/* Subtle center crosshair guide */}
-                        {cell === 0 && (
-                          <span
-                            className={`w-1 h-1 rounded-full ${
-                              isJoinAnchor ? 'bg-[#D71921]/70' : 'bg-[#26262C]'
-                            }`}
-                          />
-                        )}
+              <div className="relative z-10">
+                {glyph.cells.map((row, r) => (
+                  <div key={r} className="flex">
+                    {row.map((cell, c) => {
+                      const outsideAdvance = c >= glyph.advanceCols;
+                      const isJoinCell = r === joinRow;
+                      const isJoinAnchor =
+                        isJoinCell &&
+                        ((glyph.joinsLeft && c === 0) ||
+                          (glyph.joinsRight && c === glyph.advanceCols - 1));
+                      const dotRadius = (cellPixelSize * params.dotDiameter) * 0.44;
+                      const shape =
+                        cell === 2 && params.nuqtaMode === 'diamond'
+                          ? 'diamond'
+                          : params.dotShape;
 
-                        {cell !== 0 && (
-                          <svg
-                            width={cellPixelSize}
-                            height={cellPixelSize}
-                            viewBox={`0 0 ${cellPixelSize} ${cellPixelSize}`}
-                            className="pointer-events-none"
-                          >
-                            <SvgDotShape
-                              cx={cellPixelSize / 2}
-                              cy={cellPixelSize / 2}
-                              r={
-                                cell === 2
-                                  ? Math.min(
-                                      cellPixelSize * 0.46,
-                                      dotRadius *
-                                        (params.nuqtaMode !== 'uniform' ? params.nuqtaScale : 1) *
-                                        (matchesJoiningNuqtaScope(
-                                          glyph,
-                                          params.joiningNuqtaScope ?? 'all'
-                                        )
-                                          ? (params.joiningNuqtaScale ?? 1)
-                                          : 1)
-                                    )
-                                  : dotRadius
-                              }
-                              shape={shape}
-                              fill={cell === 2 ? '#D71921' : '#F5F5F5'}
+                      return (
+                        <button
+                          key={c}
+                          type="button"
+                          onPointerDown={(e) => handleCellPointerDown(e, r, c)}
+                          onPointerEnter={() => handleCellPointerEnter(r, c)}
+                          style={{
+                            width: cellPixelSize,
+                            height: cellPixelSize,
+                          }}
+                          className={`relative flex items-center justify-center border-r border-b border-[#1D1D22] transition-colors cursor-crosshair focus:outline-none ${
+                            outsideAdvance
+                              ? 'bg-[#08080A]/65 hover:bg-[#141418]/75'
+                              : isJoinCell
+                                ? 'bg-[#D71921]/[0.05] hover:bg-[#1C1C22]/70'
+                                : 'hover:bg-[#17171C]/65'
+                          }`}
+                          aria-label={`Row ${r} Column ${c}`}
+                        >
+                          {/* Subtle center crosshair guide */}
+                          {cell === 0 && (
+                            <span
+                              className={`w-1 h-1 rounded-full ${
+                                isJoinAnchor ? 'bg-[#D71921]/70' : 'bg-[#26262C]'
+                              }`}
                             />
-                          </svg>
-                        )}
-                      </button>
-                    );
-                  })}
-                </div>
-              ))}
+                          )}
+
+                          {cell !== 0 && (
+                            <svg
+                              width={cellPixelSize}
+                              height={cellPixelSize}
+                              viewBox={`0 0 ${cellPixelSize} ${cellPixelSize}`}
+                              className="pointer-events-none"
+                            >
+                              <SvgDotShape
+                                cx={cellPixelSize / 2}
+                                cy={cellPixelSize / 2}
+                                r={
+                                  cell === 2
+                                    ? Math.min(
+                                        cellPixelSize * 0.46,
+                                        dotRadius *
+                                          (params.nuqtaMode !== 'uniform' ? params.nuqtaScale : 1) *
+                                          (matchesJoiningNuqtaScope(
+                                            glyph,
+                                            params.joiningNuqtaScope ?? 'all'
+                                          )
+                                            ? (params.joiningNuqtaScale ?? 1)
+                                            : 1)
+                                      )
+                                    : dotRadius
+                                }
+                                shape={shape}
+                                fill={cell === 2 ? '#D71921' : '#F5F5F5'}
+                              />
+                            </svg>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                ))}
+              </div>
 
               {/* Advance Width Right Boundary Hairline */}
               <div
                 style={{ left: glyph.advanceCols * cellPixelSize }}
-                className="pointer-events-none absolute top-0 bottom-0 w-px bg-[#52525B]"
+                className="pointer-events-none absolute top-0 bottom-0 z-20 w-px bg-[#52525B]"
               />
             </div>
           </div>
 
           {/* Footer Coordinate & Legend Readout */}
-          <div className="mt-3 ml-7 flex items-center justify-between text-[11px] font-mono-tech text-[#8E8E93]">
+          <div className="mt-3 ml-7 flex items-center justify-between gap-4 text-[11px] font-mono-tech text-[#8E8E93]">
             <span>
               {hoverCoord
                 ? `Col ${hoverCoord.c} · Row ${hoverCoord.r}${hoverCoord.r === joinRow ? ' (Cursive Join Row)' : ''}`
                 : 'Left-click drag to paint · Right-click toggles Nuqta'}
             </span>
-            <span className="flex items-center gap-3">
+            <span className="flex items-center gap-3 shrink-0">
+              {showSkeletonGuide && (
+                <span
+                  title={`Reference centerline from ${skeletonFontLabel}`}
+                  className="flex items-center gap-1.5 text-[#7DD3FC]"
+                >
+                  <span className="inline-block w-2.5 h-0.5 bg-[#38BDF8]" />
+                  Skeleton
+                </span>
+              )}
               <span className="flex items-center gap-1.5">
                 <span className="inline-block w-2 h-2 rounded-full bg-[#F5F5F5]" />
                 Stroke

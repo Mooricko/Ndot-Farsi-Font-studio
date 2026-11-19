@@ -33,12 +33,14 @@ interface LeftInspectorProps {
   presets: FontPreset[];
   activePresetId: string | null;
   dottedJoiningCount: number;
+  syncLetterForms: boolean;
   skeletonFontName: string;
   skeletonThreshold: number;
   isSkeletonizing: boolean;
   onSelectPreset: (preset: FontPreset) => void;
   onSavePreset: (name: string) => void;
   onDeletePreset: (id: string) => void;
+  onToggleSyncLetterForms: () => void;
   onBulkNudgeJoiningNuqtas: (dr: number, dc: number) => void;
   onBulkSeparateJoiningNuqtas: () => void;
   onResetJoiningNuqtas: () => void;
@@ -163,12 +165,14 @@ export const LeftInspector: React.FC<LeftInspectorProps> = ({
   presets,
   activePresetId,
   dottedJoiningCount,
+  syncLetterForms,
   skeletonFontName,
   skeletonThreshold,
   isSkeletonizing,
   onSelectPreset,
   onSavePreset,
   onDeletePreset,
+  onToggleSyncLetterForms,
   onBulkNudgeJoiningNuqtas,
   onBulkSeparateJoiningNuqtas,
   onResetJoiningNuqtas,
@@ -719,6 +723,27 @@ export const LeftInspector: React.FC<LeftInspectorProps> = ({
             <span
               className={`block w-3.5 h-3.5 bg-[#F5F5F5] transition-transform ${
                 params.includeLatin ? 'translate-x-4' : 'translate-x-0.5'
+              }`}
+            />
+          </button>
+        </label>
+
+        <label className="flex items-center justify-between pt-1 cursor-pointer select-none">
+          <span className="text-xs text-[#D4D4D8]">Sync All Letter Forms</span>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={syncLetterForms}
+            onClick={onToggleSyncLetterForms}
+            className={`relative w-9 h-5 transition-colors border ${
+              syncLetterForms
+                ? 'bg-[#D71921] border-[#D71921]'
+                : 'bg-[#0E0E10] border-[#3F3F46]'
+            }`}
+          >
+            <span
+              className={`block w-3.5 h-3.5 bg-[#F5F5F5] transition-transform ${
+                syncLetterForms ? 'translate-x-4' : 'translate-x-0.5'
               }`}
             />
           </button>

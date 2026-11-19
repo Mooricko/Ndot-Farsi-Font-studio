@@ -26,6 +26,12 @@ import {
   countDottedJoiningGlyphs,
   matchesJoiningNuqtaScope,
 } from './engine/shaper';
+import {
+  buildCloneShapeToFamilyPatch,
+  buildSyncedFamilyPatch,
+  buildSyncedNudgePatch,
+  getLetterFamilyGlyphs,
+} from './engine/formSync';
 import { compileNdotTtf } from './engine/ttfCompiler';
 import { LeftInspector } from './components/LeftInspector';
 import { PlaygroundView } from './components/PlaygroundView';
@@ -58,6 +64,8 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('playground');
   const [selectedGlyphId, setSelectedGlyphId] = useState<string>('beh.isol');
   const [previewTheme, setPreviewTheme] = useState<'dark' | 'light'>('dark');
+  const [syncLetterForms, setSyncLetterForms] = useState<boolean>(false);
+  const [showSkeletonGuide, setShowSkeletonGuide] = useState<boolean>(false);
 
   // Automated skeletonizer state
   const [skeletonFontFamily, setSkeletonFontFamily] = useState<string>('Vazirmatn');
@@ -71,9 +79,9 @@ export default function App() {
   const activeFontFaceRef = useRef<FontFace | null>(null);
   const compileRevRef = useRef<number>(0);
 
-  // Per-glyph undo/redo stacks
-  const [undoStacks, setUndoStacks] = useState<Record<string, GlyphData[]>>({});
-  const [redoStacks, setRedoStacks] = useState<Record<string, GlyphData[]>>({});
+  // Atomic multi-glyph undo/redo stacks (supports single-glyph and universal letter-form edits)
+  const [undoStack, setUndoStack] = useState<Array<Record<string, GlyphData>>>([]);
+  const [redoStack, setRedoStack] = useState<Array<Record<string, GlyphData>>>([]);
 
   // Toast feedback
   const [toast, setToast] = useState<ToastState | null>(null);
@@ -128,61 +136,118 @@ export default function App() {
     };
   }, []);
 
-  // Update glyph with undo history
-  const handleUpdateGlyph = useCallback((updated: GlyphData) => {
-    setLibrary((prev) => {
-      const existing = prev[updated.id];
-      if (existing) {
-        setUndoStacks((uPrev) => ({
-          ...uPrev,
-          [updated.id]: [...(uPrev[updated.id] ?? []).slice(-39), existing],
-        }));
-        setRedoStacks((rPrev) => ({
-          ...rPrev,
-          [updated.id]: [],
-        }));
+  const commitLibraryPatch = useCallback(
+    (patch: Record<string, GlyphData>) => {
+      const ids = Object.keys(patch);
+      if (ids.length === 0) return;
+
+      const beforeSnapshot: Record<string, GlyphData> = {};
+      for (const id of ids) {
+        if (library[id]) beforeSnapshot[id] = library[id];
       }
-      return { ...prev, [updated.id]: updated };
+      if (Object.keys(beforeSnapshot).length > 0) {
+        setUndoStack((prev) => [...prev.slice(-49), beforeSnapshot]);
+        setRedoStack([]);
+      }
+      setLibrary((prev) => ({ ...prev, ...patch }));
+    },
+    [library]
+  );
+
+  // Update glyph (and universally sync all sibling forms when syncLetterForms is enabled)
+  const handleUpdateGlyph = useCallback(
+    (updated: GlyphData) => {
+      const existing = library[updated.id];
+      if (!existing) return;
+
+      if (syncLetterForms && existing.baseLetter) {
+        const spec = RESOLUTION_SPECS[params.gridResolution];
+        const joinRow = spec.joinRow + params.joinRowOffset;
+        const patch = buildSyncedFamilyPatch(library, existing, updated, joinRow);
+        commitLibraryPatch(patch);
+      } else {
+        commitLibraryPatch({ [updated.id]: updated });
+      }
+    },
+    [library, syncLetterForms, params.gridResolution, params.joinRowOffset, commitLibraryPatch]
+  );
+
+  const handleNudgeGlyph = useCallback(
+    (dr: number, dc: number) => {
+      const current = library[selectedGlyphId];
+      if (!current) return;
+
+      if (syncLetterForms && current.baseLetter) {
+        const patch = buildSyncedNudgePatch(library, current, dr, dc);
+        commitLibraryPatch(patch);
+      } else {
+        const nextCells: CellType[][] = Array.from({ length: current.rows }, (_, r) =>
+          Array.from({ length: current.cols }, (_, c) => {
+            const sr = r - dr;
+            const sc = c - dc;
+            if (sr >= 0 && sr < current.rows && sc >= 0 && sc < current.cols) {
+              return current.cells[sr][sc];
+            }
+            return 0;
+          })
+        );
+        commitLibraryPatch({
+          [current.id]: { ...current, cells: nextCells, isCustomized: true },
+        });
+      }
+    },
+    [library, selectedGlyphId, syncLetterForms, commitLibraryPatch]
+  );
+
+  const handleCloneShapeToAllForms = useCallback(() => {
+    const current = library[selectedGlyphId];
+    if (!current || !current.baseLetter) return;
+    const spec = RESOLUTION_SPECS[params.gridResolution];
+    const joinRow = spec.joinRow + params.joinRowOffset;
+    const patch = buildCloneShapeToFamilyPatch(library, current, joinRow);
+    const count = Object.keys(patch).length;
+    if (count === 0) return;
+    commitLibraryPatch(patch);
+    showToast(`Copied "${current.name}" matrix to all ${count + 1} forms of «${current.baseLetter}»`);
+  }, [library, selectedGlyphId, params.gridResolution, params.joinRowOffset, commitLibraryPatch, showToast]);
+
+  const handleToggleSyncLetterForms = useCallback(() => {
+    setSyncLetterForms((prev) => {
+      const next = !prev;
+      showToast(
+        next
+          ? 'Universal form sync enabled — edits apply to all contextual forms of the active letter'
+          : 'Universal form sync disabled — edits apply only to the selected form'
+      );
+      return next;
     });
-  }, []);
+  }, [showToast]);
 
   const handleUndo = useCallback(() => {
-    const stack = undoStacks[selectedGlyphId] ?? [];
-    if (stack.length === 0) return;
-    const previous = stack[stack.length - 1];
-    const current = library[selectedGlyphId];
-
-    setUndoStacks((prev) => ({
-      ...prev,
-      [selectedGlyphId]: stack.slice(0, -1),
-    }));
-    if (current) {
-      setRedoStacks((prev) => ({
-        ...prev,
-        [selectedGlyphId]: [...(prev[selectedGlyphId] ?? []), current],
-      }));
+    if (undoStack.length === 0) return;
+    const previousPatch = undoStack[undoStack.length - 1];
+    const currentSnapshot: Record<string, GlyphData> = {};
+    for (const id of Object.keys(previousPatch)) {
+      if (library[id]) currentSnapshot[id] = library[id];
     }
-    setLibrary((prev) => ({ ...prev, [selectedGlyphId]: previous }));
-  }, [undoStacks, selectedGlyphId, library]);
+
+    setUndoStack((prev) => prev.slice(0, -1));
+    setRedoStack((prev) => [...prev.slice(-49), currentSnapshot]);
+    setLibrary((prev) => ({ ...prev, ...previousPatch }));
+  }, [undoStack, library]);
 
   const handleRedo = useCallback(() => {
-    const stack = redoStacks[selectedGlyphId] ?? [];
-    if (stack.length === 0) return;
-    const next = stack[stack.length - 1];
-    const current = library[selectedGlyphId];
-
-    setRedoStacks((prev) => ({
-      ...prev,
-      [selectedGlyphId]: stack.slice(0, -1),
-    }));
-    if (current) {
-      setUndoStacks((prev) => ({
-        ...prev,
-        [selectedGlyphId]: [...(prev[selectedGlyphId] ?? []), current],
-      }));
+    if (redoStack.length === 0) return;
+    const nextPatch = redoStack[redoStack.length - 1];
+    const currentSnapshot: Record<string, GlyphData> = {};
+    for (const id of Object.keys(nextPatch)) {
+      if (library[id]) currentSnapshot[id] = library[id];
     }
-    setLibrary((prev) => ({ ...prev, [selectedGlyphId]: next }));
-  }, [redoStacks, selectedGlyphId, library]);
+
+    setRedoStack((prev) => prev.slice(0, -1));
+    setUndoStack((prev) => [...prev.slice(-49), currentSnapshot]);
+    setLibrary((prev) => ({ ...prev, ...nextPatch }));
+  }, [redoStack, library]);
 
   // Keyboard shortcuts for Undo / Redo inside Glyph Editor
   useEffect(() => {
@@ -222,8 +287,8 @@ export default function App() {
       }
       return nextLib;
     });
-    setUndoStacks({});
-    setRedoStacks({});
+    setUndoStack([]);
+    setRedoStack([]);
   }, []);
 
   const handleChangeResolution = useCallback(
@@ -428,22 +493,36 @@ export default function App() {
   const handleSkeletonizeCurrent = useCallback(() => {
     const current = library[selectedGlyphId];
     if (!current) return;
-    const thinned = skeletonizeGlyphFromFont(
-      current,
-      skeletonFontFamily,
-      params.gridResolution,
-      skeletonThreshold
+    const targets =
+      syncLetterForms && current.baseLetter
+        ? getLetterFamilyGlyphs(library, current)
+        : [current];
+
+    const patch: Record<string, GlyphData> = {};
+    for (const g of targets) {
+      const thinned = skeletonizeGlyphFromFont(
+        g,
+        skeletonFontFamily,
+        params.gridResolution,
+        skeletonThreshold
+      );
+      patch[g.id] = { ...thinned, isCustomized: true };
+    }
+    commitLibraryPatch(patch);
+    showToast(
+      targets.length > 1
+        ? `Skeletonized all ${targets.length} forms of «${current.baseLetter}» using ${skeletonFontLabel}`
+        : `Skeletonized "${current.name}" using ${skeletonFontLabel}`
     );
-    handleUpdateGlyph({ ...thinned, isCustomized: true });
-    showToast(`Skeletonized "${current.name}" using ${skeletonFontLabel}`);
   }, [
     library,
     selectedGlyphId,
+    syncLetterForms,
     skeletonFontFamily,
     skeletonFontLabel,
     params.gridResolution,
     skeletonThreshold,
-    handleUpdateGlyph,
+    commitLibraryPatch,
     showToast,
   ]);
 
@@ -473,8 +552,8 @@ export default function App() {
       }
 
       setLibrary(nextLib);
-      setUndoStacks({});
-      setRedoStacks({});
+      setUndoStack([]);
+      setRedoStack([]);
       showToast(`Skeletonized all glyphs from ${skeletonFontLabel}`);
     } finally {
       setIsSkeletonizing(false);
@@ -501,22 +580,37 @@ export default function App() {
       }
       setLibrary(resampled);
     }
-    setUndoStacks({});
-    setRedoStacks({});
+    setUndoStack([]);
+    setRedoStack([]);
     showToast('Restored hand-tuned Persian & Latin dot masters');
   }, [params.gridResolution, showToast]);
 
   const handleResetSelectedGlyph = useCallback(() => {
+    const current = library[selectedGlyphId];
+    if (!current) return;
     const masters = createDefaultGlyphLibrary();
-    const base = masters[selectedGlyphId];
-    if (!base) return;
-    const restored =
-      params.gridResolution === '9x11'
-        ? base
-        : resampleGlyphToResolution(base, params.gridResolution);
-    handleUpdateGlyph({ ...restored, isCustomized: false });
-    showToast(`Reset "${base.name}" to hand-tuned master`);
-  }, [selectedGlyphId, params.gridResolution, handleUpdateGlyph, showToast]);
+    const targets =
+      syncLetterForms && current.baseLetter
+        ? getLetterFamilyGlyphs(library, current)
+        : [current];
+
+    const patch: Record<string, GlyphData> = {};
+    for (const g of targets) {
+      const base = masters[g.id];
+      if (!base) continue;
+      const restored =
+        params.gridResolution === '9x11'
+          ? base
+          : resampleGlyphToResolution(base, params.gridResolution);
+      patch[g.id] = { ...restored, isCustomized: false };
+    }
+    commitLibraryPatch(patch);
+    showToast(
+      targets.length > 1
+        ? `Reset all ${targets.length} forms of «${current.baseLetter}» to hand-tuned masters`
+        : `Reset "${current.name}" to hand-tuned master`
+    );
+  }, [library, selectedGlyphId, syncLetterForms, params.gridResolution, commitLibraryPatch, showToast]);
 
   const handleExportTtf = useCallback(() => {
     try {
@@ -621,8 +715,8 @@ export default function App() {
           setMetadata({ ...DEFAULT_FONT_METADATA, ...parsed.metadata });
         }
         setLibrary(merged);
-        setUndoStacks({});
-        setRedoStacks({});
+        setUndoStack([]);
+        setRedoStack([]);
         showToast(`Loaded project "${file.name}"`);
       } catch (err) {
         showToast(
@@ -700,12 +794,14 @@ export default function App() {
           presets={allPresets}
           activePresetId={activePresetId}
           dottedJoiningCount={dottedJoiningCount}
+          syncLetterForms={syncLetterForms}
           skeletonFontName={skeletonFontLabel}
           skeletonThreshold={skeletonThreshold}
           isSkeletonizing={isSkeletonizing}
           onSelectPreset={handleSelectPreset}
           onSavePreset={handleSavePreset}
           onDeletePreset={handleDeletePreset}
+          onToggleSyncLetterForms={handleToggleSyncLetterForms}
           onBulkNudgeJoiningNuqtas={handleBulkNudgeJoiningNuqtas}
           onBulkSeparateJoiningNuqtas={handleBulkSeparateJoiningNuqtas}
           onResetJoiningNuqtas={handleResetJoiningNuqtas}
@@ -740,9 +836,19 @@ export default function App() {
               library={library}
               params={params}
               liveFontFamily={liveFontFamily}
-              canUndo={(undoStacks[selectedGlyph.id]?.length ?? 0) > 0}
-              canRedo={(redoStacks[selectedGlyph.id]?.length ?? 0) > 0}
+              syncLetterForms={syncLetterForms}
+              showSkeletonGuide={showSkeletonGuide}
+              skeletonFontFamily={skeletonFontFamily}
+              skeletonFontLabel={skeletonFontLabel}
+              skeletonThreshold={skeletonThreshold}
+              canUndo={undoStack.length > 0}
+              canRedo={redoStack.length > 0}
+              onToggleSyncLetterForms={handleToggleSyncLetterForms}
+              onToggleSkeletonGuide={setShowSkeletonGuide}
+              onSelectGlyph={handleSelectGlyph}
               onUpdateGlyph={handleUpdateGlyph}
+              onNudgeGlyph={handleNudgeGlyph}
+              onCloneShapeToAllForms={handleCloneShapeToAllForms}
               onUndo={handleUndo}
               onRedo={handleRedo}
               onResetGlyph={handleResetSelectedGlyph}

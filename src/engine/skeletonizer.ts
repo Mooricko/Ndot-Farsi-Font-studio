@@ -446,6 +446,226 @@ export function skeletonizeGlyphFromFont(
 }
 
 /**
+ * Renders the original base-font skeleton sketch (low-opacity glyph wash +
+ * crisp Zhang-Suen centerline wireframe + original nuqta centroid markers)
+ * onto an overlay canvas aligned directly to the Glyph Editor grid.
+ */
+export function renderSkeletonSketchToCanvas(
+  canvas: HTMLCanvasElement,
+  glyph: GlyphData,
+  fontFamily: string,
+  resolution: GridResolution,
+  cellPixelSize: number,
+  joinRowOffset: number,
+  alphaThreshold = 96
+): void {
+  const cssW = glyph.cols * cellPixelSize;
+  const cssH = glyph.rows * cellPixelSize;
+  const dpr = Math.min(2, window.devicePixelRatio || 2);
+
+  if (canvas.width !== Math.round(cssW * dpr) || canvas.height !== Math.round(cssH * dpr)) {
+    canvas.width = Math.round(cssW * dpr);
+    canvas.height = Math.round(cssH * dpr);
+  }
+
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssW, cssH);
+
+  const spec = RESOLUTION_SPECS[resolution];
+  const joinRow = Math.max(0, Math.min(glyph.rows - 1, spec.joinRow + joinRowOffset));
+
+  // Special case for Tatweel / Kashida
+  if (glyph.id === 'kashida') {
+    const y = (joinRow + 0.5) * cellPixelSize;
+    const x1 = 0.5 * cellPixelSize;
+    const x2 = Math.max(x1, (glyph.advanceCols - 0.5) * cellPixelSize);
+    ctx.strokeStyle = 'rgba(56, 189, 248, 0.72)';
+    ctx.lineWidth = Math.max(2, cellPixelSize * 0.07);
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(x1, y);
+    ctx.lineTo(x2, y);
+    ctx.stroke();
+    return;
+  }
+
+  const W = 144;
+  const H = 144;
+  const off = document.createElement('canvas');
+  off.width = W;
+  off.height = H;
+  const octx = off.getContext('2d', { willReadFrequently: true });
+  if (!octx) return;
+
+  octx.clearRect(0, 0, W, H);
+  octx.fillStyle = '#38BDF8';
+  const fontSize = Math.round(H * 0.62);
+  octx.font = `400 ${fontSize}px "${fontFamily}", "Vazirmatn", sans-serif`;
+  octx.textAlign = 'center';
+  octx.textBaseline = 'alphabetic';
+
+  const baselinePx = Math.round(((spec.baselineRow + 0.5) / glyph.rows) * H);
+  const renderStr = getRenderStringForGlyph(glyph);
+  octx.fillText(renderStr, W / 2, baselinePx);
+
+  const imgData = octx.getImageData(0, 0, W, H).data;
+  const binary = new Uint8Array(W * H);
+  let activeCount = 0;
+  let minX = W;
+  let maxX = 0;
+
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const idx = y * W + x;
+      if (imgData[idx * 4 + 3] >= alphaThreshold) {
+        binary[idx] = 1;
+        activeCount++;
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+      }
+    }
+  }
+
+  if (activeCount < 6 || minX >= maxX) {
+    return;
+  }
+
+  const comps = extractConnectedComponents(binary, W, H);
+  comps.sort((a, b) => b.area - a.area);
+
+  const isPersianLetter =
+    glyph.category === 'isol' ||
+    glyph.category === 'init' ||
+    glyph.category === 'medi' ||
+    glyph.category === 'fina';
+
+  const maxArea = comps[0].area;
+  const strokeBinary = new Uint8Array(W * H);
+  const nuqtaComps: Component[] = [];
+
+  for (let i = 0; i < comps.length; i++) {
+    const comp = comps[i];
+    const bw = comp.maxX - comp.minX + 1;
+    const bh = comp.maxY - comp.minY + 1;
+    const aspect = Math.max(bw, bh) / Math.max(1, Math.min(bw, bh));
+    const isSmallDot =
+      isPersianLetter &&
+      i > 0 &&
+      comp.area < maxArea * 0.32 &&
+      bw < fontSize * 0.34 &&
+      bh < fontSize * 0.34 &&
+      aspect < 2.2;
+
+    if (isSmallDot) {
+      nuqtaComps.push(comp);
+    } else {
+      for (const [px, py] of comp.pixels) {
+        strokeBinary[py * W + px] = 1;
+      }
+    }
+  }
+
+  const thinned = zhangSuenThin(strokeBinary, W, H);
+
+  // Uniform scale preserves authentic base-font aspect ratio while matching grid row pitch
+  const scale = cssH / H;
+  const glyphCenterX = (minX + maxX) / 2;
+  const rawOffsetX = (glyph.advanceCols * cellPixelSize) / 2 - glyphCenterX * scale;
+  const minAllowedX = 2 - minX * scale;
+  const maxAllowedX = cssW - 2 - maxX * scale;
+  const offsetX =
+    minAllowedX <= maxAllowedX
+      ? Math.max(minAllowedX, Math.min(maxAllowedX, rawOffsetX))
+      : rawOffsetX;
+  const offsetY = joinRowOffset * cellPixelSize;
+
+  // 1. Subtle low-opacity ghost of the original font silhouette
+  ctx.save();
+  ctx.globalAlpha = 0.14;
+  ctx.drawImage(off, offsetX, offsetY, W * scale, H * scale);
+  ctx.restore();
+
+  // 2. Crisp Zhang-Suen 1px centerline wireframe in technical blueprint cyan
+  ctx.save();
+  ctx.strokeStyle = 'rgba(56, 189, 248, 0.72)';
+  ctx.fillStyle = 'rgba(56, 189, 248, 0.72)';
+  ctx.lineWidth = Math.max(1.75, cellPixelSize * 0.065);
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+
+  const toX = (x: number) => (x + 0.5) * scale + offsetX;
+  const toY = (y: number) => (y + 0.5) * scale + offsetY;
+
+  ctx.beginPath();
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      if (thinned[y * W + x] === 0) continue;
+      const sx = toX(x);
+      const sy = toY(y);
+      let connected = false;
+
+      // Forward 8-connected neighbors avoid duplicate segments
+      if (x + 1 < W && thinned[y * W + (x + 1)] === 1) {
+        ctx.moveTo(sx, sy);
+        ctx.lineTo(toX(x + 1), sy);
+        connected = true;
+      }
+      if (y + 1 < H && thinned[(y + 1) * W + x] === 1) {
+        ctx.moveTo(sx, sy);
+        ctx.lineTo(sx, toY(y + 1));
+        connected = true;
+      }
+      if (x + 1 < W && y + 1 < H && thinned[(y + 1) * W + (x + 1)] === 1) {
+        ctx.moveTo(sx, sy);
+        ctx.lineTo(toX(x + 1), toY(y + 1));
+        connected = true;
+      }
+      if (x - 1 >= 0 && y + 1 < H && thinned[(y + 1) * W + (x - 1)] === 1) {
+        ctx.moveTo(sx, sy);
+        ctx.lineTo(toX(x - 1), toY(y + 1));
+        connected = true;
+      }
+
+      if (!connected) {
+        // Check if completely isolated pixel
+        const hasPrev =
+          (x > 0 && thinned[y * W + (x - 1)] === 1) ||
+          (y > 0 && thinned[(y - 1) * W + x] === 1) ||
+          (x > 0 && y > 0 && thinned[(y - 1) * W + (x - 1)] === 1) ||
+          (x + 1 < W && y > 0 && thinned[(y - 1) * W + (x + 1)] === 1);
+        if (!hasPrev) {
+          ctx.moveTo(sx, sy);
+          ctx.lineTo(sx + 0.01, sy);
+        }
+      }
+    }
+  }
+  ctx.stroke();
+  ctx.restore();
+
+  // 3. Original nuqta centroids in soft amber drafting rings
+  if (nuqtaComps.length > 0) {
+    ctx.save();
+    const r = Math.max(3.5, cellPixelSize * 0.14);
+    for (const nc of nuqtaComps) {
+      const nx = toX(nc.cx);
+      const ny = toY(nc.cy);
+      ctx.beginPath();
+      ctx.arc(nx, ny, r, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(251, 191, 36, 0.22)';
+      ctx.fill();
+      ctx.lineWidth = 1.4;
+      ctx.strokeStyle = 'rgba(251, 191, 36, 0.78)';
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+}
+
+/**
  * Cleanly resamples a master glyph from its current grid dimensions to a new GridResolution
  * (7x9, 9x11, 11x13, 13x15) while preserving single-row strokes, nuqta separation, and joinRow alignment.
  */
