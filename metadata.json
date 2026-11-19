@@ -1,0 +1,6 @@
+{
+  "name": "Ndot Farsi",
+  "description": "Parametric Farsi (Persian) dot-matrix typeface studio with single-row stroke masters, automated Zhang-Suen skeletonization, interactive glyph editing, live RTL HarfBuzz preview, and TrueType (.ttf) OpenType GSUB export.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
