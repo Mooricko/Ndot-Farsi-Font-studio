@@ -12,13 +12,15 @@ import {
   GridResolution,
   ProjectFileV1,
   RESOLUTION_SPECS,
+  resolveSkeletonGuideConfig,
+  SkeletonGuideConfig,
   WorkspaceTab,
 } from './types/font';
 import { createDefaultGlyphLibrary } from './data/persianMasters';
 import {
   loadCustomBaseFont,
   resampleGlyphToResolution,
-  skeletonizeGlyphFromFont,
+  skeletonizeGlyphWithGuideAsync,
 } from './engine/skeletonizer';
 import {
   bulkNudgeJoiningNuqtas,
@@ -279,10 +281,13 @@ export default function App() {
       const nextLib: Record<string, GlyphData> = {};
       for (const [id, g] of Object.entries(prev)) {
         if (nextRes === '9x11' && !g.isCustomized && baseMasters[id]) {
-          nextLib[id] = baseMasters[id];
+          nextLib[id] = { ...baseMasters[id], skeletonGuide: g.skeletonGuide };
         } else {
           const source = !g.isCustomized && baseMasters[id] ? baseMasters[id] : g;
-          nextLib[id] = resampleGlyphToResolution(source, nextRes);
+          nextLib[id] = {
+            ...resampleGlyphToResolution(source, nextRes),
+            skeletonGuide: g.skeletonGuide,
+          };
         }
       }
       return nextLib;
@@ -490,7 +495,45 @@ export default function App() {
     [showToast]
   );
 
-  const handleSkeletonizeCurrent = useCallback(() => {
+  const handleUpdateSkeletonGuide = useCallback(
+    (patch: Partial<SkeletonGuideConfig>) => {
+      setLibrary((prev) => {
+        const current = prev[selectedGlyphId];
+        if (!current) return prev;
+        const nextGuide = resolveSkeletonGuideConfig({
+          ...current.skeletonGuide,
+          ...patch,
+        });
+        return {
+          ...prev,
+          [selectedGlyphId]: {
+            ...current,
+            skeletonGuide: nextGuide,
+          },
+        };
+      });
+    },
+    [selectedGlyphId]
+  );
+
+  const handleResetSkeletonGuide = useCallback(() => {
+    const current = library[selectedGlyphId];
+    if (!current) return;
+    setLibrary((prev) => {
+      const g = prev[selectedGlyphId];
+      if (!g) return prev;
+      return {
+        ...prev,
+        [selectedGlyphId]: {
+          ...g,
+          skeletonGuide: undefined,
+        },
+      };
+    });
+    showToast(`Reset skeleton guide settings for "${current.name}"`);
+  }, [library, selectedGlyphId, showToast]);
+
+  const handleSkeletonizeCurrent = useCallback(async () => {
     const current = library[selectedGlyphId];
     if (!current) return;
     const targets =
@@ -500,19 +543,22 @@ export default function App() {
 
     const patch: Record<string, GlyphData> = {};
     for (const g of targets) {
-      const thinned = skeletonizeGlyphFromFont(
+      const thinned = await skeletonizeGlyphWithGuideAsync(
         g,
         skeletonFontFamily,
         params.gridResolution,
-        skeletonThreshold
+        skeletonThreshold,
+        params.joinRowOffset
       );
       patch[g.id] = { ...thinned, isCustomized: true };
     }
     commitLibraryPatch(patch);
     showToast(
       targets.length > 1
-        ? `Skeletonized all ${targets.length} forms of «${current.baseLetter}» using ${skeletonFontLabel}`
-        : `Skeletonized "${current.name}" using ${skeletonFontLabel}`
+        ? `Skeletonized all ${targets.length} forms of «${current.baseLetter}» using active guides`
+        : current.skeletonGuide?.customImageDataUrl
+          ? `Skeletonized "${current.name}" from custom sketch image`
+          : `Skeletonized "${current.name}" using ${skeletonFontLabel}`
     );
   }, [
     library,
@@ -521,6 +567,7 @@ export default function App() {
     skeletonFontFamily,
     skeletonFontLabel,
     params.gridResolution,
+    params.joinRowOffset,
     skeletonThreshold,
     commitLibraryPatch,
     showToast,
@@ -541,11 +588,12 @@ export default function App() {
         for (const id of slice) {
           const g = nextLib[id];
           if (!params.includeLatin && g.category === 'latin') continue;
-          nextLib[id] = skeletonizeGlyphFromFont(
+          nextLib[id] = await skeletonizeGlyphWithGuideAsync(
             g,
             skeletonFontFamily,
             params.gridResolution,
-            skeletonThreshold
+            skeletonThreshold,
+            params.joinRowOffset
           );
         }
         await new Promise((r) => window.setTimeout(r, 0));
@@ -563,6 +611,7 @@ export default function App() {
     library,
     params.includeLatin,
     params.gridResolution,
+    params.joinRowOffset,
     skeletonFontFamily,
     skeletonFontLabel,
     skeletonThreshold,
@@ -602,7 +651,11 @@ export default function App() {
         params.gridResolution === '9x11'
           ? base
           : resampleGlyphToResolution(base, params.gridResolution);
-      patch[g.id] = { ...restored, isCustomized: false };
+      patch[g.id] = {
+        ...restored,
+        isCustomized: false,
+        skeletonGuide: g.skeletonGuide,
+      };
     }
     commitLibraryPatch(patch);
     showToast(
@@ -658,6 +711,7 @@ export default function App() {
         rightBearing: g.rightBearing,
         advanceCols: g.advanceCols,
         isCustomized: g.isCustomized,
+        ...(g.skeletonGuide ? { skeletonGuide: g.skeletonGuide } : {}),
       };
     }
 
@@ -703,6 +757,9 @@ export default function App() {
               rightBearing: saved.rightBearing ?? def.rightBearing,
               advanceCols: saved.advanceCols ?? def.advanceCols,
               isCustomized: saved.isCustomized ?? false,
+              skeletonGuide: saved.skeletonGuide
+                ? resolveSkeletonGuideConfig(saved.skeletonGuide)
+                : undefined,
             };
           } else {
             merged[id] = resampleGlyphToResolution(def, parsed.params.gridResolution);
@@ -845,6 +902,9 @@ export default function App() {
               canRedo={redoStack.length > 0}
               onToggleSyncLetterForms={handleToggleSyncLetterForms}
               onToggleSkeletonGuide={setShowSkeletonGuide}
+              onUpdateSkeletonGuide={handleUpdateSkeletonGuide}
+              onResetSkeletonGuide={handleResetSkeletonGuide}
+              onErrorToast={(msg) => showToast(msg, true)}
               onSelectGlyph={handleSelectGlyph}
               onUpdateGlyph={handleUpdateGlyph}
               onNudgeGlyph={handleNudgeGlyph}

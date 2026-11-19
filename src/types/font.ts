@@ -60,6 +60,59 @@ export type GlyphCategory =
   | 'punct'
   | 'latin';
 
+export type SkeletonGuideSourceForm = 'auto' | 'isol' | 'init' | 'medi' | 'fina';
+
+export interface SkeletonGuideConfig {
+  scale: number;              // 0.40 .. 2.00 uniform multiplier
+  scaleX: number;             // 0.50 .. 1.80 width resize multiplier
+  scaleY: number;             // 0.50 .. 1.80 height resize multiplier
+  offsetX: number;            // -4.0 .. +4.0 grid cells horizontal shift
+  offsetY: number;            // -4.0 .. +4.0 grid cells vertical shift
+  opacity: number;            // 0.15 .. 1.00 reference visual opacity
+  sourceForm: SkeletonGuideSourceForm;
+  customChar: string;         // Literal replacement char(s) or Unicode hex e.g. U+FECA
+  customImageDataUrl?: string;
+  invertImage: boolean;       // true = dark ink on light background; false = light ink on dark
+}
+
+export const DEFAULT_SKELETON_GUIDE_CONFIG: SkeletonGuideConfig = {
+  scale: 1.0,
+  scaleX: 1.0,
+  scaleY: 1.0,
+  offsetX: 0,
+  offsetY: 0,
+  opacity: 0.72,
+  sourceForm: 'auto',
+  customChar: '',
+  customImageDataUrl: undefined,
+  invertImage: true,
+};
+
+export function resolveSkeletonGuideConfig(
+  cfg?: Partial<SkeletonGuideConfig>
+): SkeletonGuideConfig {
+  return {
+    ...DEFAULT_SKELETON_GUIDE_CONFIG,
+    ...(cfg ?? {}),
+  };
+}
+
+export function hasCustomSkeletonGuide(cfg?: Partial<SkeletonGuideConfig>): boolean {
+  if (!cfg) return false;
+  const c = resolveSkeletonGuideConfig(cfg);
+  return (
+    Math.abs(c.scale - DEFAULT_SKELETON_GUIDE_CONFIG.scale) > 0.001 ||
+    Math.abs(c.scaleX - DEFAULT_SKELETON_GUIDE_CONFIG.scaleX) > 0.001 ||
+    Math.abs(c.scaleY - DEFAULT_SKELETON_GUIDE_CONFIG.scaleY) > 0.001 ||
+    Math.abs(c.offsetX - DEFAULT_SKELETON_GUIDE_CONFIG.offsetX) > 0.001 ||
+    Math.abs(c.offsetY - DEFAULT_SKELETON_GUIDE_CONFIG.offsetY) > 0.001 ||
+    Math.abs(c.opacity - DEFAULT_SKELETON_GUIDE_CONFIG.opacity) > 0.001 ||
+    c.sourceForm !== 'auto' ||
+    c.customChar.trim().length > 0 ||
+    Boolean(c.customImageDataUrl)
+  );
+}
+
 export interface GlyphData {
   id: string;
   name: string;           // Human-readable name e.g. "Beh (Initial)"
@@ -79,6 +132,7 @@ export interface GlyphData {
   rightBearing: number;   // in grid columns
   advanceCols: number;    // active width in columns (content width)
   isCustomized?: boolean;
+  skeletonGuide?: SkeletonGuideConfig;
 }
 
 export type JoiningNuqtaScope = 'all' | 'init' | 'medi' | 'fina';
@@ -128,6 +182,7 @@ export interface ProjectFileV1 {
       rightBearing: number;
       advanceCols: number;
       isCustomized?: boolean;
+      skeletonGuide?: SkeletonGuideConfig;
     }
   >;
 }

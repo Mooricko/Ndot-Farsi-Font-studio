@@ -4,6 +4,8 @@ import {
   ArrowLeft,
   ArrowRight,
   ArrowUp,
+  ChevronDown,
+  ChevronUp,
   Copy,
   Eraser,
   Link2,
@@ -11,6 +13,7 @@ import {
   Plus,
   Redo2,
   RotateCcw,
+  SlidersHorizontal,
   Sparkles,
   Undo2,
 } from 'lucide-react';
@@ -18,15 +21,22 @@ import {
   CellType,
   FontParams,
   GlyphData,
+  hasCustomSkeletonGuide,
   RESOLUTION_SPECS,
+  SkeletonGuideConfig,
 } from '../types/font';
 import {
   getContextualSampleWord,
   matchesJoiningNuqtaScope,
 } from '../engine/shaper';
 import { getLetterFamilyGlyphs } from '../engine/formSync';
-import { renderSkeletonSketchToCanvas } from '../engine/skeletonizer';
+import {
+  ensureGuideImageLoaded,
+  getCachedGuideImage,
+  renderSkeletonSketchToCanvas,
+} from '../engine/skeletonizer';
 import { GlyphMiniSvg, SvgDotShape, VectorLineSvg } from './DotSvgRenderer';
+import { SkeletonGuidePanel } from './SkeletonGuidePanel';
 
 interface GlyphEditorViewProps {
   glyph: GlyphData;
@@ -42,6 +52,9 @@ interface GlyphEditorViewProps {
   canRedo: boolean;
   onToggleSyncLetterForms: () => void;
   onToggleSkeletonGuide: (show: boolean) => void;
+  onUpdateSkeletonGuide: (patch: Partial<SkeletonGuideConfig>) => void;
+  onResetSkeletonGuide: () => void;
+  onErrorToast: (message: string) => void;
   onSelectGlyph: (id: string) => void;
   onUpdateGlyph: (updated: GlyphData) => void;
   onNudgeGlyph: (dr: number, dc: number) => void;
@@ -66,6 +79,9 @@ export const GlyphEditorView: React.FC<GlyphEditorViewProps> = ({
   canRedo,
   onToggleSyncLetterForms,
   onToggleSkeletonGuide,
+  onUpdateSkeletonGuide,
+  onResetSkeletonGuide,
+  onErrorToast,
   onSelectGlyph,
   onUpdateGlyph,
   onNudgeGlyph,
@@ -78,12 +94,16 @@ export const GlyphEditorView: React.FC<GlyphEditorViewProps> = ({
   const [brushMode, setBrushMode] = useState<'stroke' | 'nuqta'>('stroke');
   const [paintValue, setPaintValue] = useState<CellType | null>(null);
   const [hoverCoord, setHoverCoord] = useState<{ r: number; c: number } | null>(null);
+  const [guideSettingsOpen, setGuideSettingsOpen] = useState<boolean>(false);
   const [fontsReadyRev, setFontsReadyRev] = useState<number>(0);
+  const [guideImageRev, setGuideImageRev] = useState<number>(0);
   const skeletonCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   const spec = RESOLUTION_SPECS[params.gridResolution];
   const joinRow = Math.max(0, Math.min(glyph.rows - 1, spec.joinRow + params.joinRowOffset));
   const cellPixelSize = glyph.rows <= 9 ? 44 : glyph.rows <= 11 ? 38 : glyph.rows <= 13 ? 32 : 28;
+  const hasGuideOverrides = hasCustomSkeletonGuide(glyph.skeletonGuide);
+  const customImageUrl = glyph.skeletonGuide?.customImageDataUrl;
 
   // Refresh reference sketch once web fonts (e.g. Vazirmatn) finish loading
   useEffect(() => {
@@ -96,9 +116,27 @@ export const GlyphEditorView: React.FC<GlyphEditorViewProps> = ({
     };
   }, [skeletonFontFamily]);
 
-  // Render original base-font skeleton sketch behind the matrix grid when enabled
+  // Decode per-glyph uploaded reference image asynchronously if not yet cached
+  useEffect(() => {
+    if (!customImageUrl) return;
+    if (getCachedGuideImage(customImageUrl)) return;
+    let active = true;
+    ensureGuideImageLoaded(customImageUrl)
+      .then(() => {
+        if (active) setGuideImageRev((n) => n + 1);
+      })
+      .catch(() => {
+        // Ignore broken data URL silently
+      });
+    return () => {
+      active = false;
+    };
+  }, [customImageUrl]);
+
+  // Render original or overridden skeleton sketch behind the matrix grid when enabled
   useEffect(() => {
     if (!showSkeletonGuide || !skeletonCanvasRef.current) return;
+    const preloadedImg = customImageUrl ? getCachedGuideImage(customImageUrl) : null;
     renderSkeletonSketchToCanvas(
       skeletonCanvasRef.current,
       glyph,
@@ -106,20 +144,20 @@ export const GlyphEditorView: React.FC<GlyphEditorViewProps> = ({
       params.gridResolution,
       cellPixelSize,
       params.joinRowOffset,
-      skeletonThreshold
+      skeletonThreshold,
+      preloadedImg
     );
   }, [
     showSkeletonGuide,
-    glyph.id,
-    glyph.cols,
-    glyph.rows,
-    glyph.advanceCols,
+    glyph,
     skeletonFontFamily,
     params.gridResolution,
     cellPixelSize,
     params.joinRowOffset,
     skeletonThreshold,
     fontsReadyRev,
+    guideImageRev,
+    customImageUrl,
   ]);
 
   const applyCell = (r: number, c: number, val: CellType) => {
@@ -244,24 +282,54 @@ export const GlyphEditorView: React.FC<GlyphEditorViewProps> = ({
           </div>
         </div>
 
-        {/* Skeleton Guide Toggle & Brush Selector */}
-        <div className="flex items-center gap-3">
-          <label
-            title={`Show original ${skeletonFontLabel} skeleton centerline behind the grid as a tracing guide`}
-            className={`flex items-center gap-2 px-2.5 py-1.5 text-xs font-medium border whitespace-nowrap cursor-pointer transition-colors ${
-              showSkeletonGuide
-                ? 'bg-[#38BDF8]/10 border-[#38BDF8]/60 text-[#E0F2FE]'
-                : 'bg-[#0E0E10] border-[#262626] text-[#A1A1AA] hover:text-[#F5F5F5] hover:border-[#3F3F46]'
-            }`}
-          >
-            <input
-              type="checkbox"
-              checked={showSkeletonGuide}
-              onChange={(e) => onToggleSkeletonGuide(e.target.checked)}
-              className="w-3.5 h-3.5 accent-[#38BDF8] cursor-pointer"
-            />
-            <span>Skeleton Guide</span>
-          </label>
+        {/* Skeleton Guide Toggle, Collapsible Settings Button & Brush Selector */}
+        <div className="flex items-center gap-2.5">
+          <div className="flex items-center">
+            <label
+              title={`Show original ${skeletonFontLabel} skeleton centerline behind the grid as a tracing guide`}
+              className={`flex items-center gap-2 px-2.5 py-1.5 text-xs font-medium border whitespace-nowrap cursor-pointer transition-colors ${
+                showSkeletonGuide
+                  ? 'bg-[#38BDF8]/10 border-[#38BDF8]/60 text-[#E0F2FE]'
+                  : 'bg-[#0E0E10] border-[#262626] text-[#A1A1AA] hover:text-[#F5F5F5] hover:border-[#3F3F46]'
+              }`}
+            >
+              <input
+                type="checkbox"
+                checked={showSkeletonGuide}
+                onChange={(e) => onToggleSkeletonGuide(e.target.checked)}
+                className="w-3.5 h-3.5 accent-[#38BDF8] cursor-pointer"
+              />
+              <span>Skeleton Guide</span>
+            </label>
+
+            <button
+              type="button"
+              aria-expanded={guideSettingsOpen}
+              onClick={() => {
+                const next = !guideSettingsOpen;
+                setGuideSettingsOpen(next);
+                if (next && !showSkeletonGuide) {
+                  onToggleSkeletonGuide(true);
+                }
+              }}
+              title="Resize, scale, reposition, or override this glyph's skeleton guide"
+              className={`flex items-center gap-1 px-2 py-1.5 text-xs font-medium border-y border-r whitespace-nowrap transition-colors ${
+                guideSettingsOpen
+                  ? 'bg-[#1B1B1F] border-[#38BDF8]/60 text-[#E0F2FE]'
+                  : hasGuideOverrides
+                    ? 'bg-[#0E0E10] border-[#38BDF8]/40 text-[#7DD3FC] hover:bg-[#1B1B1F]'
+                    : 'bg-[#0E0E10] border-[#262626] text-[#A1A1AA] hover:text-[#F5F5F5] hover:bg-[#1B1B1F]'
+              }`}
+            >
+              <SlidersHorizontal className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Settings</span>
+              {guideSettingsOpen ? (
+                <ChevronUp className="w-3.5 h-3.5" />
+              ) : (
+                <ChevronDown className="w-3.5 h-3.5" />
+              )}
+            </button>
+          </div>
 
           <div className="flex items-center bg-[#0E0E10] p-0.5 border border-[#262626]">
             <button
@@ -289,6 +357,17 @@ export const GlyphEditorView: React.FC<GlyphEditorViewProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Collapsible Per-Glyph Skeleton Guide Settings Panel */}
+      {guideSettingsOpen && (
+        <SkeletonGuidePanel
+          glyph={glyph}
+          skeletonFontLabel={skeletonFontLabel}
+          onUpdateGuide={onUpdateSkeletonGuide}
+          onResetGuide={onResetSkeletonGuide}
+          onErrorToast={onErrorToast}
+        />
+      )}
 
       {/* Universal Letter-Form Sync & Sibling Strip (for multi-form Persian letters like ع) */}
       {hasMultipleForms && (

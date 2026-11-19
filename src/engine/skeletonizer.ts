@@ -2,7 +2,10 @@ import {
   CellType,
   GlyphData,
   GridResolution,
+  hasCustomSkeletonGuide,
   RESOLUTION_SPECS,
+  resolveSkeletonGuideConfig,
+  SkeletonGuideConfig,
 } from '../types/font';
 
 /**
@@ -225,42 +228,628 @@ function extractConnectedComponents(
   return comps;
 }
 
-function getRenderStringForGlyph(glyph: GlyphData): string {
-  if (glyph.category === 'liga') {
-    if (glyph.id === 'lam_alef.isol') return 'لا';
-    if (glyph.id === 'lam_alef.fina') return '\u200Dلا';
-    if (glyph.id === 'lam_alef_madda.isol') return 'لآ';
-    if (glyph.id === 'lam_alef_madda.fina') return '\u200Dلآ';
-    return glyph.char;
+// Authoritative Unicode Presentation Form codepoints (Blocks FB50–FDFF & FE70–FEFF)
+// used as fallback if a browser/font fails to shape bare ZWJ contextual sequences.
+const PERSIAN_PRESENTATION_FORMS: Record<
+  string,
+  Partial<Record<'isol' | 'init' | 'medi' | 'fina', number>>
+> = {
+  'آ': { isol: 0xfe81, fina: 0xfe82 },
+  'ا': { isol: 0xfe8d, fina: 0xfe8e },
+  'ب': { isol: 0xfe8f, fina: 0xfe90, init: 0xfe91, medi: 0xfe92 },
+  'پ': { isol: 0xfb56, fina: 0xfb57, init: 0xfb58, medi: 0xfb59 },
+  'ت': { isol: 0xfe95, fina: 0xfe96, init: 0xfe97, medi: 0xfe98 },
+  'ث': { isol: 0xfe99, fina: 0xfe9a, init: 0xfe9b, medi: 0xfe9c },
+  'ج': { isol: 0xfe9d, fina: 0xfe9e, init: 0xfe9f, medi: 0xfea0 },
+  'چ': { isol: 0xfb7a, fina: 0xfb7b, init: 0xfb7c, medi: 0xfb7d },
+  'ح': { isol: 0xfea1, fina: 0xfea2, init: 0xfea3, medi: 0xfea4 },
+  'خ': { isol: 0xfea5, fina: 0xfea6, init: 0xfea7, medi: 0xfea8 },
+  'د': { isol: 0xfea9, fina: 0xfeaa },
+  'ذ': { isol: 0xfeab, fina: 0xfeac },
+  'ر': { isol: 0xfead, fina: 0xfeae },
+  'ز': { isol: 0xfeaf, fina: 0xfeb0 },
+  'ژ': { isol: 0xfb8a, fina: 0xfb8b },
+  'س': { isol: 0xfeb1, fina: 0xfeb2, init: 0xfeb3, medi: 0xfeb4 },
+  'ش': { isol: 0xfeb5, fina: 0xfeb6, init: 0xfeb7, medi: 0xfeb8 },
+  'ص': { isol: 0xfeb9, fina: 0xfeba, init: 0xfebb, medi: 0xfebc },
+  'ض': { isol: 0xfebd, fina: 0xfebe, init: 0xfebf, medi: 0xfec0 },
+  'ط': { isol: 0xfec1, fina: 0xfec2, init: 0xfec3, medi: 0xfec4 },
+  'ظ': { isol: 0xfec5, fina: 0xfec6, init: 0xfec7, medi: 0xfec8 },
+  'ع': { isol: 0xfec9, fina: 0xfeca, init: 0xfecb, medi: 0xfecc },
+  'غ': { isol: 0xfecd, fina: 0xfece, init: 0xfecf, medi: 0xfed0 },
+  'ف': { isol: 0xfed1, fina: 0xfed2, init: 0xfed3, medi: 0xfed4 },
+  'ق': { isol: 0xfed5, fina: 0xfed6, init: 0xfed7, medi: 0xfed8 },
+  'ک': { isol: 0xfb8e, fina: 0xfb8f, init: 0xfb90, medi: 0xfb91 },
+  'گ': { isol: 0xfb92, fina: 0xfb93, init: 0xfb94, medi: 0xfb95 },
+  'ل': { isol: 0xfedd, fina: 0xfede, init: 0xfedf, medi: 0xfee0 },
+  'م': { isol: 0xfee1, fina: 0xfee2, init: 0xfee3, medi: 0xfee4 },
+  'ن': { isol: 0xfee5, fina: 0xfee6, init: 0xfee7, medi: 0xfee8 },
+  'و': { isol: 0xfeed, fina: 0xfeee },
+  'ه': { isol: 0xfee9, fina: 0xfeea, init: 0xfeeb, medi: 0xfeec },
+  'ی': { isol: 0xfbfc, fina: 0xfbfd, init: 0xfbfe, medi: 0xfbff },
+};
+
+const LIGA_PRESENTATION_FORMS: Record<string, number> = {
+  'lam_alef.isol': 0xfefb,
+  'lam_alef.fina': 0xfefc,
+  'lam_alef_madda.isol': 0xfef5,
+  'lam_alef_madda.fina': 0xfef6,
+};
+
+function hasArabicOrPersianChars(text: string): boolean {
+  return /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/.test(text);
+}
+
+/**
+ * Parses a user-entered replacement string or Unicode codepoint notation
+ * (e.g. "U+FECA", "0xFECC", "U+0644 U+0627", or literal "ـعـ").
+ * Returns null when empty or while the user is mid-way through typing a hex codepoint.
+ */
+export function parseCustomSkeletonInput(raw: string): string | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+
+  // Detect hex codepoint notation prefix so partial typing ("U+FE") doesn't render literal ASCII
+  if (/^(?:U\+|0x)/i.test(trimmed)) {
+    const tokens = trimmed.split(/[\s,]+/).filter(Boolean);
+    const chars: string[] = [];
+    for (const token of tokens) {
+      const match = /^(?:U\+|0x)([0-9A-Fa-f]{4,6})$/i.exec(token);
+      if (!match) return null;
+      const cp = parseInt(match[1], 16);
+      if (!Number.isFinite(cp) || cp < 0 || cp > 0x10ffff) return null;
+      chars.push(String.fromCodePoint(cp));
+    }
+    return chars.length > 0 ? chars.join('') : null;
   }
+
+  return trimmed;
+}
+
+interface ResolvedRenderSpec {
+  primaryText: string;
+  isolatedComparisonText?: string;
+  presentationFallbackText?: string;
+  isRtl: boolean;
+  allowNuqtaSplit: boolean;
+}
+
+function resolveRenderSpecForGlyph(
+  glyph: GlyphData,
+  guide: SkeletonGuideConfig
+): ResolvedRenderSpec {
+  const parsedCustom = parseCustomSkeletonInput(guide.customChar);
+  if (parsedCustom) {
+    const isRtl = hasArabicOrPersianChars(parsedCustom);
+    return {
+      primaryText: parsedCustom,
+      isRtl,
+      allowNuqtaSplit: isRtl,
+    };
+  }
+
+  const effectiveForm =
+    guide.sourceForm !== 'auto' ? guide.sourceForm : glyph.contextualForm;
+
+  if (glyph.category === 'liga') {
+    if (glyph.id === 'lam_alef.isol' || glyph.id === 'lam_alef.fina') {
+      const useFina =
+        effectiveForm === 'fina' ||
+        effectiveForm === 'medi' ||
+        (guide.sourceForm === 'auto' && glyph.id === 'lam_alef.fina');
+      const fallbackCp = useFina
+        ? LIGA_PRESENTATION_FORMS['lam_alef.fina']
+        : LIGA_PRESENTATION_FORMS['lam_alef.isol'];
+      return {
+        primaryText: useFina ? '\u200Dلا' : 'لا',
+        isolatedComparisonText: useFina ? 'لا' : undefined,
+        presentationFallbackText: String.fromCodePoint(fallbackCp),
+        isRtl: true,
+        allowNuqtaSplit: false,
+      };
+    }
+    if (glyph.id === 'lam_alef_madda.isol' || glyph.id === 'lam_alef_madda.fina') {
+      const useFina =
+        effectiveForm === 'fina' ||
+        effectiveForm === 'medi' ||
+        (guide.sourceForm === 'auto' && glyph.id === 'lam_alef_madda.fina');
+      const fallbackCp = useFina
+        ? LIGA_PRESENTATION_FORMS['lam_alef_madda.fina']
+        : LIGA_PRESENTATION_FORMS['lam_alef_madda.isol'];
+      return {
+        primaryText: useFina ? '\u200Dلآ' : 'لآ',
+        isolatedComparisonText: useFina ? 'لآ' : undefined,
+        presentationFallbackText: String.fromCodePoint(fallbackCp),
+        isRtl: true,
+        allowNuqtaSplit: false,
+      };
+    }
+    return {
+      primaryText: glyph.char,
+      isRtl: hasArabicOrPersianChars(glyph.char),
+      allowNuqtaSplit: false,
+    };
+  }
+
   const base = glyph.baseLetter ?? glyph.char;
-  if (glyph.contextualForm === 'init') return `${base}\u200D`;
-  if (glyph.contextualForm === 'medi') return `\u200D${base}\u200D`;
-  if (glyph.contextualForm === 'fina') return `\u200D${base}`;
-  return base;
+  const isRtl = hasArabicOrPersianChars(base);
+  const isPersianLetter =
+    glyph.category === 'isol' ||
+    glyph.category === 'init' ||
+    glyph.category === 'medi' ||
+    glyph.category === 'fina';
+
+  if (effectiveForm && isRtl) {
+    const presMap = PERSIAN_PRESENTATION_FORMS[base];
+    const presCp = presMap?.[effectiveForm];
+    const presChar = presCp !== undefined ? String.fromCodePoint(presCp) : undefined;
+
+    if (effectiveForm === 'init') {
+      return {
+        primaryText: `${base}\u200D`,
+        isolatedComparisonText: base,
+        presentationFallbackText: presChar,
+        isRtl: true,
+        allowNuqtaSplit: isPersianLetter,
+      };
+    }
+    if (effectiveForm === 'medi') {
+      return {
+        primaryText: `\u200D${base}\u200D`,
+        isolatedComparisonText: base,
+        presentationFallbackText: presChar,
+        isRtl: true,
+        allowNuqtaSplit: isPersianLetter,
+      };
+    }
+    if (effectiveForm === 'fina') {
+      return {
+        primaryText: `\u200D${base}`,
+        isolatedComparisonText: base,
+        presentationFallbackText: presChar,
+        isRtl: true,
+        allowNuqtaSplit: isPersianLetter,
+      };
+    }
+    return {
+      primaryText: base,
+      presentationFallbackText: presChar,
+      isRtl: true,
+      allowNuqtaSplit: isPersianLetter,
+    };
+  }
+
+  return {
+    primaryText: base,
+    isRtl,
+    allowNuqtaSplit: isPersianLetter,
+  };
+}
+
+// In-memory cache of decoded per-glyph custom reference images
+const guideImageCache = new Map<string, HTMLImageElement>();
+
+export function getCachedGuideImage(dataUrl?: string): HTMLImageElement | null {
+  if (!dataUrl) return null;
+  const img = guideImageCache.get(dataUrl);
+  if (img && img.complete && img.naturalWidth > 0) return img;
+  return null;
+}
+
+export function ensureGuideImageLoaded(dataUrl: string): Promise<HTMLImageElement> {
+  const cached = getCachedGuideImage(dataUrl);
+  if (cached) return Promise.resolve(cached);
+
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      guideImageCache.set(dataUrl, img);
+      resolve(img);
+    };
+    img.onerror = () => reject(new Error('Failed to decode reference image'));
+    img.src = dataUrl;
+  });
+}
+
+/**
+ * Loads a user-selected image file (PNG, JPG, SVG, WebP) and normalizes it
+ * to a compact max-256px PNG data URL suitable for per-glyph persistence.
+ */
+export async function loadGuideImageDataUrlFromFile(file: File): Promise<string> {
+  if (!file.type.startsWith('image/')) {
+    throw new Error('Please upload an image file (PNG, JPG, SVG, or WebP)');
+  }
+
+  const rawDataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(new Error('Could not read image file'));
+    reader.readAsDataURL(file);
+  });
+
+  const img = await ensureGuideImageLoaded(rawDataUrl);
+  const maxDim = 256;
+  const ratio = Math.min(1, maxDim / Math.max(1, img.naturalWidth, img.naturalHeight));
+  const outW = Math.max(1, Math.round(img.naturalWidth * ratio));
+  const outH = Math.max(1, Math.round(img.naturalHeight * ratio));
+
+  const canvas = document.createElement('canvas');
+  canvas.width = outW;
+  canvas.height = outH;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return rawDataUrl;
+
+  ctx.clearRect(0, 0, outW, outH);
+  ctx.drawImage(img, 0, 0, outW, outH);
+  const normalizedUrl = canvas.toDataURL('image/png');
+  await ensureGuideImageLoaded(normalizedUrl);
+  return normalizedUrl;
+}
+
+interface ExtractedSkeletonGeometry {
+  W: number;
+  H: number;
+  silhouetteCanvas: HTMLCanvasElement;
+  thinned: Uint8Array;
+  nuqtaComps: Component[];
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+  anchorOffX: number;
+  anchorOffY: number;
+  targetAnchorCol: number;
+  targetAnchorRow: number;
+  effScaleX: number;
+  effScaleY: number;
+  toGridCol: (x: number) => number;
+  toGridRow: (y: number) => number;
+  isCustomImage: boolean;
+}
+
+function rasterizeTextBinary(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  font: string,
+  W: number,
+  H: number,
+  baselinePx: number,
+  isRtl: boolean,
+  alphaThreshold: number
+): { binary: Uint8Array; activeCount: number } {
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#38BDF8';
+  ctx.font = font;
+  ctx.direction = isRtl ? 'rtl' : 'ltr';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillText(text, W / 2, baselinePx);
+
+  const imgData = ctx.getImageData(0, 0, W, H).data;
+  const binary = new Uint8Array(W * H);
+  let activeCount = 0;
+  for (let i = 0; i < W * H; i++) {
+    if (imgData[i * 4 + 3] >= alphaThreshold) {
+      binary[i] = 1;
+      activeCount++;
+    }
+  }
+  return { binary, activeCount };
+}
+
+function bitmapsNearlyEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  let diffs = 0;
+  let union = 0;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) diffs++;
+    if (a[i] === 1 || b[i] === 1) union++;
+  }
+  if (union === 0) return true;
+  return diffs / union < 0.03;
+}
+
+/**
+ * Unified skeleton geometry pipeline consumed by BOTH the live Blueprint Overlay
+ * and the Skeletonize CTA so the visual guide and generated dots align 1-to-1.
+ */
+function extractSkeletonGeometry(
+  glyph: GlyphData,
+  fontFamily: string,
+  resolution: GridResolution,
+  joinRowOffset: number,
+  alphaThreshold: number,
+  preloadedImage?: HTMLImageElement | null
+): ExtractedSkeletonGeometry | null {
+  const spec = RESOLUTION_SPECS[resolution];
+  const targetCols = spec.cols;
+  const targetRows = spec.rows;
+  const guide = resolveSkeletonGuideConfig(glyph.skeletonGuide);
+
+  const W = 144;
+  const H = 144;
+  const off = document.createElement('canvas');
+  off.width = W;
+  off.height = H;
+  const octx = off.getContext('2d', { willReadFrequently: true });
+  if (!octx) return null;
+
+  const fontSize = Math.round(H * 0.62);
+  const baselinePx = Math.round(((spec.baselineRow + 0.5) / targetRows) * H);
+
+  let binary: Uint8Array = new Uint8Array(W * H);
+  let activeCount = 0;
+  let allowNuqtaSplit = false;
+  let isCustomImage = false;
+
+  const customImg =
+    guide.customImageDataUrl
+      ? (preloadedImage ?? getCachedGuideImage(guide.customImageDataUrl))
+      : null;
+
+  if (customImg) {
+    isCustomImage = true;
+    // Draw uploaded image fitted cleanly inside offscreen frame
+    const pad = 16;
+    const avail = W - pad * 2;
+    const imgScale = Math.min(avail / Math.max(1, customImg.naturalWidth), avail / Math.max(1, customImg.naturalHeight));
+    const drawW = customImg.naturalWidth * imgScale;
+    const drawH = customImg.naturalHeight * imgScale;
+    const drawX = (W - drawW) / 2;
+    const drawY = (H - drawH) / 2;
+
+    octx.clearRect(0, 0, W, H);
+    octx.drawImage(customImg, drawX, drawY, drawW, drawH);
+
+    const imgData = octx.getImageData(0, 0, W, H);
+    const data = imgData.data;
+
+    // Detect transparent background vs solid opaque background
+    let transparentPixels = 0;
+    for (let i = 0; i < W * H; i++) {
+      if (data[i * 4 + 3] < 32) transparentPixels++;
+    }
+    const hasTransparentBg = transparentPixels > W * H * 0.08;
+
+    // Build binary stroke mask & replace silhouette with clean blueprint cyan
+    const lumCutoff = Math.max(30, 255 - Math.min(220, alphaThreshold));
+    for (let i = 0; i < W * H; i++) {
+      const r = data[i * 4];
+      const g = data[i * 4 + 1];
+      const b = data[i * 4 + 2];
+      const a = data[i * 4 + 3];
+      const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+
+      let isFg = false;
+      if (hasTransparentBg) {
+        if (a >= alphaThreshold) {
+          isFg = guide.invertImage ? lum < 245 : true;
+        }
+      } else {
+        isFg = guide.invertImage ? lum < lumCutoff : lum >= alphaThreshold;
+      }
+
+      if (isFg) {
+        binary[i] = 1;
+        activeCount++;
+        data[i * 4] = 56;     // #38
+        data[i * 4 + 1] = 189; // #BD
+        data[i * 4 + 2] = 248; // #F8
+        data[i * 4 + 3] = 255;
+      } else {
+        data[i * 4 + 3] = 0;
+      }
+    }
+    octx.putImageData(imgData, 0, 0);
+    allowNuqtaSplit =
+      glyph.category === 'isol' ||
+      glyph.category === 'init' ||
+      glyph.category === 'medi' ||
+      glyph.category === 'fina';
+  } else {
+    const renderSpec = resolveRenderSpecForGlyph(glyph, guide);
+    const fontStr = `400 ${fontSize}px "${fontFamily}", "Vazirmatn", sans-serif`;
+    allowNuqtaSplit = renderSpec.allowNuqtaSplit;
+
+    let result = rasterizeTextBinary(
+      octx,
+      renderSpec.primaryText,
+      fontStr,
+      W,
+      H,
+      baselinePx,
+      renderSpec.isRtl,
+      alphaThreshold
+    );
+
+    // Automatic verification fallback: if a font/browser ignored ZWJ for a contextual form
+    // and produced the isolated silhouette, switch to the exact Unicode Presentation Form.
+    if (
+      renderSpec.isolatedComparisonText &&
+      renderSpec.presentationFallbackText &&
+      result.activeCount >= 6
+    ) {
+      const cmpCanvas = document.createElement('canvas');
+      cmpCanvas.width = W;
+      cmpCanvas.height = H;
+      const cmpCtx = cmpCanvas.getContext('2d', { willReadFrequently: true });
+      if (cmpCtx) {
+        const isoRes = rasterizeTextBinary(
+          cmpCtx,
+          renderSpec.isolatedComparisonText,
+          fontStr,
+          W,
+          H,
+          baselinePx,
+          renderSpec.isRtl,
+          alphaThreshold
+        );
+        if (bitmapsNearlyEqual(result.binary, isoRes.binary)) {
+          const presRes = rasterizeTextBinary(
+            octx,
+            renderSpec.presentationFallbackText,
+            fontStr,
+            W,
+            H,
+            baselinePx,
+            renderSpec.isRtl,
+            alphaThreshold
+          );
+          if (presRes.activeCount >= 6) {
+            result = presRes;
+          } else {
+            // Re-render primary text if presentation form wasn't in font
+            result = rasterizeTextBinary(
+              octx,
+              renderSpec.primaryText,
+              fontStr,
+              W,
+              H,
+              baselinePx,
+              renderSpec.isRtl,
+              alphaThreshold
+            );
+          }
+        }
+      }
+    }
+
+    binary = result.binary;
+    activeCount = result.activeCount;
+  }
+
+  if (activeCount < 6) return null;
+
+  let minX = W;
+  let maxX = 0;
+  let minY = H;
+  let maxY = 0;
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      if (binary[y * W + x] === 1) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+  if (minX > maxX || minY > maxY) return null;
+
+  const comps = extractConnectedComponents(binary, W, H);
+  comps.sort((a, b) => b.area - a.area);
+
+  const maxArea = comps[0].area;
+  const strokeBinary = new Uint8Array(W * H);
+  const nuqtaComps: Component[] = [];
+
+  for (let i = 0; i < comps.length; i++) {
+    const comp = comps[i];
+    const bw = comp.maxX - comp.minX + 1;
+    const bh = comp.maxY - comp.minY + 1;
+    const aspect = Math.max(bw, bh) / Math.max(1, Math.min(bw, bh));
+    const isSmallDot =
+      allowNuqtaSplit &&
+      i > 0 &&
+      comp.area < maxArea * 0.32 &&
+      bw < fontSize * 0.34 &&
+      bh < fontSize * 0.34 &&
+      aspect < 2.1;
+
+    if (isSmallDot) {
+      nuqtaComps.push(comp);
+    } else {
+      for (const [px, py] of comp.pixels) {
+        strokeBinary[py * W + px] = 1;
+      }
+    }
+  }
+
+  const thinned = zhangSuenThin(strokeBinary, W, H);
+
+  // Unified grid-cell projection math (1 grid row = H / targetRows offscreen pixels at scale 1.0)
+  const baseCellScale = targetRows / H;
+  const effScaleX = baseCellScale * guide.scale * guide.scaleX;
+  const effScaleY = baseCellScale * guide.scale * guide.scaleY;
+
+  const anchorOffX = (minX + maxX) / 2;
+  const anchorOffY = isCustomImage ? (minY + maxY) / 2 : baselinePx;
+
+  let targetAnchorCol = glyph.advanceCols / 2 + guide.offsetX;
+  const targetAnchorRow = isCustomImage
+    ? targetRows / 2 + guide.offsetY
+    : spec.baselineRow + 0.5 + joinRowOffset + guide.offsetY;
+
+  // When user hasn't explicitly shifted/scaled horizontally, gently keep wide glyphs inside [0..targetCols]
+  const isDefaultHorizontal =
+    Math.abs(guide.offsetX) < 0.001 &&
+    Math.abs(guide.scale - 1) < 0.001 &&
+    Math.abs(guide.scaleX - 1) < 0.001;
+  if (isDefaultHorizontal) {
+    const halfSpanCols = ((maxX - minX) / 2) * effScaleX;
+    const minCenter = halfSpanCols + 0.1;
+    const maxCenter = targetCols - halfSpanCols - 0.1;
+    if (minCenter <= maxCenter) {
+      targetAnchorCol = Math.max(minCenter, Math.min(maxCenter, targetAnchorCol));
+    }
+  }
+
+  const toGridCol = (x: number) => (x + 0.5 - anchorOffX) * effScaleX + targetAnchorCol;
+  const toGridRow = (y: number) => (y + 0.5 - anchorOffY) * effScaleY + targetAnchorRow;
+
+  return {
+    W,
+    H,
+    silhouetteCanvas: off,
+    thinned,
+    nuqtaComps,
+    minX,
+    maxX,
+    minY,
+    maxY,
+    anchorOffX,
+    anchorOffY,
+    targetAnchorCol,
+    targetAnchorRow,
+    effScaleX,
+    effScaleY,
+    toGridCol,
+    toGridRow,
+    isCustomImage,
+  };
 }
 
 /**
  * Approach A: Rasterizes a Farsi/Latin glyph from any loaded browser/uploaded font
- * (e.g., Vazirmatn or custom uploaded TTF), separates nuqta dots from main strokes,
+ * (or per-glyph custom reference image), respects per-glyph Skeleton Guide overrides
+ * (source form, custom char/Unicode, scale, width/height resize, X/Y offset),
  * applies Zhang-Suen morphological thinning, snaps to the active dot-matrix grid,
- * and enforces cursive join alignment.
+ * and enforces strict single-row thickness + cursive join alignment.
  */
 export function skeletonizeGlyphFromFont(
   glyph: GlyphData,
   fontFamily: string,
   resolution: GridResolution,
-  alphaThreshold = 96
+  alphaThreshold = 96,
+  joinRowOffset = 0,
+  preloadedImage?: HTMLImageElement | null
 ): GlyphData {
   const spec = RESOLUTION_SPECS[resolution];
   const targetCols = spec.cols;
   const targetRows = spec.rows;
+  const joinRow = Math.max(0, Math.min(targetRows - 1, spec.joinRow + joinRowOffset));
+  const guide = resolveSkeletonGuideConfig(glyph.skeletonGuide);
+  const hasCustomGuide = hasCustomSkeletonGuide(glyph.skeletonGuide);
 
-  // Special case for Tatweel / Kashida: clean single horizontal row on joinRow
-  if (glyph.id === 'kashida') {
+  // Special case for Tatweel / Kashida when no custom source override is set
+  if (
+    glyph.id === 'kashida' &&
+    !guide.customChar.trim() &&
+    !guide.customImageDataUrl
+  ) {
     const cells: CellType[][] = Array.from({ length: targetRows }, (_, r) =>
       Array.from({ length: targetCols }, (_, c) =>
-        r === spec.joinRow && c < 4 ? 1 : 0
+        r === joinRow && c < 4 ? 1 : 0
       )
     );
     return {
@@ -273,126 +862,49 @@ export function skeletonizeGlyphFromFont(
     };
   }
 
-  const W = 144;
-  const H = 144;
-  const canvas = document.createElement('canvas');
-  canvas.width = W;
-  canvas.height = H;
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
-  if (!ctx) return glyph;
-
-  ctx.clearRect(0, 0, W, H);
-  ctx.fillStyle = '#FFFFFF';
-  const fontSize = Math.round(H * 0.62);
-  ctx.font = `400 ${fontSize}px "${fontFamily}", "Vazirmatn", sans-serif`;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'alphabetic';
-
-  const baselinePx = Math.round(((spec.baselineRow + 0.5) / targetRows) * H);
-  const renderStr = getRenderStringForGlyph(glyph);
-  ctx.fillText(renderStr, W / 2, baselinePx);
-
-  const imgData = ctx.getImageData(0, 0, W, H).data;
-  const binary = new Uint8Array(W * H);
-  let activeCount = 0;
-
-  for (let i = 0; i < W * H; i++) {
-    if (imgData[i * 4 + 3] >= alphaThreshold) {
-      binary[i] = 1;
-      activeCount++;
-    }
-  }
-
-  if (activeCount < 6) {
-    // Fallback to resampled master if font lacks glyph
-    return resampleGlyphToResolution(glyph, resolution);
-  }
-
-  const comps = extractConnectedComponents(binary, W, H);
-  comps.sort((a, b) => b.area - a.area);
-
-  // Classify small compact detached components on Persian letters as nuqtas
-  const isPersianLetter =
-    glyph.category === 'isol' ||
-    glyph.category === 'init' ||
-    glyph.category === 'medi' ||
-    glyph.category === 'fina';
-
-  const maxArea = comps[0].area;
-  const strokeBinary = new Uint8Array(W * H);
-  const nuqtaComps: Component[] = [];
-
-  for (let i = 0; i < comps.length; i++) {
-    const comp = comps[i];
-    const bw = comp.maxX - comp.minX + 1;
-    const bh = comp.maxY - comp.minY + 1;
-    const aspect = Math.max(bw, bh) / Math.max(1, Math.min(bw, bh));
-    const isSmallDot =
-      isPersianLetter &&
-      i > 0 &&
-      comp.area < maxArea * 0.32 &&
-      bw < fontSize * 0.34 &&
-      bh < fontSize * 0.34 &&
-      aspect < 2.2;
-
-    if (isSmallDot) {
-      nuqtaComps.push(comp);
-    } else {
-      for (const [px, py] of comp.pixels) {
-        strokeBinary[py * W + px] = 1;
-      }
-    }
-  }
-
-  // Run Zhang-Suen thinning on stroke body ONLY
-  const thinned = zhangSuenThin(strokeBinary, W, H);
-
-  // Measure horizontal bounds across both thinned strokes & nuqtas
-  let minX = W;
-  let maxX = 0;
-  for (let y = 0; y < H; y++) {
-    for (let x = 0; x < W; x++) {
-      if (thinned[y * W + x] === 1) {
-        if (x < minX) minX = x;
-        if (x > maxX) maxX = x;
-      }
-    }
-  }
-  for (const nc of nuqtaComps) {
-    if (nc.minX < minX) minX = nc.minX;
-    if (nc.maxX > maxX) maxX = nc.maxX;
-  }
-
-  if (minX >= maxX) {
-    return resampleGlyphToResolution(glyph, resolution);
-  }
-
-  const cellPx = H / targetRows;
-  const spanCols = Math.max(
-    glyph.joinsLeft || glyph.joinsRight ? 3 : 2,
-    Math.min(targetCols, Math.round((maxX - minX) / cellPx) + 1)
+  const geom = extractSkeletonGeometry(
+    glyph,
+    fontFamily,
+    resolution,
+    joinRowOffset,
+    alphaThreshold,
+    preloadedImage
   );
+
+  if (!geom) {
+    return resampleGlyphToResolution(glyph, resolution);
+  }
+
+  const { W, H, thinned, nuqtaComps, toGridCol, toGridRow } = geom;
 
   const cells: CellType[][] = Array.from({ length: targetRows }, () =>
     Array.from({ length: targetCols }, () => 0 as CellType)
   );
 
-  // Project thinned stroke pixels onto discrete grid
+  // Project transformed thinned stroke pixels directly onto discrete grid cells (1-to-1 with overlay)
   const strokeHits = new Uint16Array(targetRows * targetCols);
+  let maxActiveCol = 0;
+  let hasAnyStroke = false;
+
   for (let y = 0; y < H; y++) {
     for (let x = 0; x < W; x++) {
       if (thinned[y * W + x] === 0) continue;
-      const col = Math.min(
-        spanCols - 1,
-        Math.max(0, Math.round(((x - minX) / Math.max(1, maxX - minX)) * (spanCols - 1)))
-      );
-      const row = Math.min(targetRows - 1, Math.max(0, Math.floor(y / cellPx)));
-      strokeHits[row * targetCols + col]++;
+      const col = Math.floor(toGridCol(x));
+      const row = Math.floor(toGridRow(y));
+      if (col >= 0 && col < targetCols && row >= 0 && row < targetRows) {
+        strokeHits[row * targetCols + col]++;
+        if (col > maxActiveCol) maxActiveCol = col;
+        hasAnyStroke = true;
+      }
     }
   }
 
+  if (!hasAnyStroke) {
+    return resampleGlyphToResolution(glyph, resolution);
+  }
+
   for (let r = 0; r < targetRows; r++) {
-    for (let c = 0; c < spanCols; c++) {
+    for (let c = 0; c < targetCols; c++) {
       if (strokeHits[r * targetCols + c] >= 1) {
         cells[r][c] = 1;
       }
@@ -402,36 +914,44 @@ export function skeletonizeGlyphFromFont(
   // Enforce strict single-row dot thickness (no 2x2 double-thick clusters)
   enforceSingleRowGrid(cells, targetRows, targetCols);
 
-  // Snap cursive connection points to spec.joinRow so connected letters align seamlessly
-  if (glyph.joinsLeft) {
-    cells[spec.joinRow][0] = 1;
-    if (spanCols > 1 && cells[spec.joinRow][1] === 0) {
-      // Connect left join dot smoothly if adjacent col has no dot nearby
-      const hasNeighbor =
-        (spec.joinRow > 0 && cells[spec.joinRow - 1][1] === 1) ||
-        (spec.joinRow + 1 < targetRows && cells[spec.joinRow + 1][1] === 1);
-      if (!hasNeighbor) cells[spec.joinRow][1] = 1;
-    }
-  }
-  if (glyph.joinsRight) {
-    cells[spec.joinRow][spanCols - 1] = 1;
-    if (spanCols > 1 && cells[spec.joinRow][spanCols - 2] === 0) {
-      const hasNeighbor =
-        (spec.joinRow > 0 && cells[spec.joinRow - 1][spanCols - 2] === 1) ||
-        (spec.joinRow + 1 < targetRows && cells[spec.joinRow + 1][spanCols - 2] === 1);
-      if (!hasNeighbor) cells[spec.joinRow][spanCols - 2] = 1;
+  // Place detected nuqta centroids onto exact transformed grid cells
+  for (const nc of nuqtaComps) {
+    const col = Math.floor(toGridCol(nc.cx));
+    const row = Math.floor(toGridRow(nc.cy));
+    if (col >= 0 && col < targetCols && row >= 0 && row < targetRows) {
+      if (col > maxActiveCol) maxActiveCol = col;
+      if (cells[row][col] === 0) {
+        cells[row][col] = 2;
+      }
     }
   }
 
-  // Place detected nuqta centroids cleanly onto grid as CellType = 2
-  for (const nc of nuqtaComps) {
-    const col = Math.min(
-      spanCols - 1,
-      Math.max(0, Math.round(((nc.cx - minX) / Math.max(1, maxX - minX)) * (spanCols - 1)))
-    );
-    const row = Math.min(targetRows - 1, Math.max(0, Math.floor(nc.cy / cellPx)));
-    if (cells[row][col] === 0) {
-      cells[row][col] = 2;
+  // Preserve current advanceCols when using a custom guide so the user's manual
+  // positioning stays rock-steady (expanding automatically if dots extend further)
+  const spanCols = hasCustomGuide
+    ? Math.max(glyph.advanceCols, Math.min(targetCols, maxActiveCol + 1))
+    : Math.max(
+        glyph.joinsLeft || glyph.joinsRight ? 3 : 2,
+        Math.min(targetCols, maxActiveCol + 1)
+      );
+
+  // Snap cursive connection points to joinRow so connected letters align seamlessly
+  if (glyph.joinsLeft) {
+    cells[joinRow][0] = 1;
+    if (spanCols > 1 && cells[joinRow][1] === 0) {
+      const hasNeighbor =
+        (joinRow > 0 && cells[joinRow - 1][1] === 1) ||
+        (joinRow + 1 < targetRows && cells[joinRow + 1][1] === 1);
+      if (!hasNeighbor) cells[joinRow][1] = 1;
+    }
+  }
+  if (glyph.joinsRight) {
+    cells[joinRow][spanCols - 1] = 1;
+    if (spanCols > 1 && cells[joinRow][spanCols - 2] === 0) {
+      const hasNeighbor =
+        (joinRow > 0 && cells[joinRow - 1][spanCols - 2] === 1) ||
+        (joinRow + 1 < targetRows && cells[joinRow + 1][spanCols - 2] === 1);
+      if (!hasNeighbor) cells[joinRow][spanCols - 2] = 1;
     }
   }
 
@@ -441,14 +961,44 @@ export function skeletonizeGlyphFromFont(
     rows: targetRows,
     cells,
     advanceCols: spanCols,
-    isCustomized: false,
+    isCustomized: hasCustomGuide ? true : false,
   };
 }
 
 /**
- * Renders the original base-font skeleton sketch (low-opacity glyph wash +
- * crisp Zhang-Suen centerline wireframe + original nuqta centroid markers)
- * onto an overlay canvas aligned directly to the Glyph Editor grid.
+ * Async wrapper that ensures any per-glyph custom reference image is decoded
+ * before running unified WYSIWYG skeletonization.
+ */
+export async function skeletonizeGlyphWithGuideAsync(
+  glyph: GlyphData,
+  fontFamily: string,
+  resolution: GridResolution,
+  alphaThreshold = 96,
+  joinRowOffset = 0
+): Promise<GlyphData> {
+  let preloaded: HTMLImageElement | null = null;
+  const imgUrl = glyph.skeletonGuide?.customImageDataUrl;
+  if (imgUrl) {
+    try {
+      preloaded = await ensureGuideImageLoaded(imgUrl);
+    } catch {
+      preloaded = null;
+    }
+  }
+  return skeletonizeGlyphFromFont(
+    glyph,
+    fontFamily,
+    resolution,
+    alphaThreshold,
+    joinRowOffset,
+    preloaded
+  );
+}
+
+/**
+ * Renders the per-glyph reference skeleton sketch (low-opacity silhouette wash +
+ * crisp Zhang-Suen centerline wireframe + original nuqta centroid rings) onto
+ * an overlay canvas aligned 1-to-1 with the Glyph Editor grid and Skeletonize CTA.
  */
 export function renderSkeletonSketchToCanvas(
   canvas: HTMLCanvasElement,
@@ -457,7 +1007,8 @@ export function renderSkeletonSketchToCanvas(
   resolution: GridResolution,
   cellPixelSize: number,
   joinRowOffset: number,
-  alphaThreshold = 96
+  alphaThreshold = 96,
+  preloadedImage?: HTMLImageElement | null
 ): void {
   const cssW = glyph.cols * cellPixelSize;
   const cssH = glyph.rows * cellPixelSize;
@@ -476,161 +1027,107 @@ export function renderSkeletonSketchToCanvas(
 
   const spec = RESOLUTION_SPECS[resolution];
   const joinRow = Math.max(0, Math.min(glyph.rows - 1, spec.joinRow + joinRowOffset));
+  const guide = resolveSkeletonGuideConfig(glyph.skeletonGuide);
+  const opacity = Math.max(0.1, Math.min(1, guide.opacity));
 
-  // Special case for Tatweel / Kashida
-  if (glyph.id === 'kashida') {
-    const y = (joinRow + 0.5) * cellPixelSize;
-    const x1 = 0.5 * cellPixelSize;
-    const x2 = Math.max(x1, (glyph.advanceCols - 0.5) * cellPixelSize);
-    ctx.strokeStyle = 'rgba(56, 189, 248, 0.72)';
+  // Special case for Tatweel / Kashida without custom source override
+  if (
+    glyph.id === 'kashida' &&
+    !guide.customChar.trim() &&
+    !guide.customImageDataUrl
+  ) {
+    const y = (joinRow + 0.5 + guide.offsetY) * cellPixelSize;
+    const centerX = (glyph.advanceCols / 2 + guide.offsetX) * cellPixelSize;
+    const halfLen = ((Math.max(1, glyph.advanceCols - 1) * guide.scale * guide.scaleX) / 2) * cellPixelSize;
+    ctx.strokeStyle = `rgba(56, 189, 248, ${opacity.toFixed(2)})`;
     ctx.lineWidth = Math.max(2, cellPixelSize * 0.07);
     ctx.lineCap = 'round';
     ctx.beginPath();
-    ctx.moveTo(x1, y);
-    ctx.lineTo(x2, y);
+    ctx.moveTo(centerX - halfLen, y);
+    ctx.lineTo(centerX + halfLen, y);
     ctx.stroke();
     return;
   }
 
-  const W = 144;
-  const H = 144;
-  const off = document.createElement('canvas');
-  off.width = W;
-  off.height = H;
-  const octx = off.getContext('2d', { willReadFrequently: true });
-  if (!octx) return;
+  const geom = extractSkeletonGeometry(
+    glyph,
+    fontFamily,
+    resolution,
+    joinRowOffset,
+    alphaThreshold,
+    preloadedImage
+  );
 
-  octx.clearRect(0, 0, W, H);
-  octx.fillStyle = '#38BDF8';
-  const fontSize = Math.round(H * 0.62);
-  octx.font = `400 ${fontSize}px "${fontFamily}", "Vazirmatn", sans-serif`;
-  octx.textAlign = 'center';
-  octx.textBaseline = 'alphabetic';
+  if (!geom) return;
 
-  const baselinePx = Math.round(((spec.baselineRow + 0.5) / glyph.rows) * H);
-  const renderStr = getRenderStringForGlyph(glyph);
-  octx.fillText(renderStr, W / 2, baselinePx);
+  const {
+    W,
+    H,
+    silhouetteCanvas,
+    thinned,
+    nuqtaComps,
+    anchorOffX,
+    anchorOffY,
+    targetAnchorCol,
+    targetAnchorRow,
+    effScaleX,
+    effScaleY,
+    toGridCol,
+    toGridRow,
+  } = geom;
 
-  const imgData = octx.getImageData(0, 0, W, H).data;
-  const binary = new Uint8Array(W * H);
-  let activeCount = 0;
-  let minX = W;
-  let maxX = 0;
+  // 1. Low-opacity ghost wash of the original font glyph or uploaded sketch
+  const destX = (targetAnchorCol - anchorOffX * effScaleX) * cellPixelSize;
+  const destY = (targetAnchorRow - anchorOffY * effScaleY) * cellPixelSize;
+  const destW = W * effScaleX * cellPixelSize;
+  const destH = H * effScaleY * cellPixelSize;
 
-  for (let y = 0; y < H; y++) {
-    for (let x = 0; x < W; x++) {
-      const idx = y * W + x;
-      if (imgData[idx * 4 + 3] >= alphaThreshold) {
-        binary[idx] = 1;
-        activeCount++;
-        if (x < minX) minX = x;
-        if (x > maxX) maxX = x;
-      }
-    }
-  }
-
-  if (activeCount < 6 || minX >= maxX) {
-    return;
-  }
-
-  const comps = extractConnectedComponents(binary, W, H);
-  comps.sort((a, b) => b.area - a.area);
-
-  const isPersianLetter =
-    glyph.category === 'isol' ||
-    glyph.category === 'init' ||
-    glyph.category === 'medi' ||
-    glyph.category === 'fina';
-
-  const maxArea = comps[0].area;
-  const strokeBinary = new Uint8Array(W * H);
-  const nuqtaComps: Component[] = [];
-
-  for (let i = 0; i < comps.length; i++) {
-    const comp = comps[i];
-    const bw = comp.maxX - comp.minX + 1;
-    const bh = comp.maxY - comp.minY + 1;
-    const aspect = Math.max(bw, bh) / Math.max(1, Math.min(bw, bh));
-    const isSmallDot =
-      isPersianLetter &&
-      i > 0 &&
-      comp.area < maxArea * 0.32 &&
-      bw < fontSize * 0.34 &&
-      bh < fontSize * 0.34 &&
-      aspect < 2.2;
-
-    if (isSmallDot) {
-      nuqtaComps.push(comp);
-    } else {
-      for (const [px, py] of comp.pixels) {
-        strokeBinary[py * W + px] = 1;
-      }
-    }
-  }
-
-  const thinned = zhangSuenThin(strokeBinary, W, H);
-
-  // Uniform scale preserves authentic base-font aspect ratio while matching grid row pitch
-  const scale = cssH / H;
-  const glyphCenterX = (minX + maxX) / 2;
-  const rawOffsetX = (glyph.advanceCols * cellPixelSize) / 2 - glyphCenterX * scale;
-  const minAllowedX = 2 - minX * scale;
-  const maxAllowedX = cssW - 2 - maxX * scale;
-  const offsetX =
-    minAllowedX <= maxAllowedX
-      ? Math.max(minAllowedX, Math.min(maxAllowedX, rawOffsetX))
-      : rawOffsetX;
-  const offsetY = joinRowOffset * cellPixelSize;
-
-  // 1. Subtle low-opacity ghost of the original font silhouette
   ctx.save();
-  ctx.globalAlpha = 0.14;
-  ctx.drawImage(off, offsetX, offsetY, W * scale, H * scale);
+  ctx.globalAlpha = Math.min(0.28, opacity * 0.22);
+  ctx.drawImage(silhouetteCanvas, destX, destY, destW, destH);
   ctx.restore();
 
   // 2. Crisp Zhang-Suen 1px centerline wireframe in technical blueprint cyan
   ctx.save();
-  ctx.strokeStyle = 'rgba(56, 189, 248, 0.72)';
-  ctx.fillStyle = 'rgba(56, 189, 248, 0.72)';
+  ctx.strokeStyle = `rgba(56, 189, 248, ${opacity.toFixed(2)})`;
+  ctx.fillStyle = `rgba(56, 189, 248, ${opacity.toFixed(2)})`;
   ctx.lineWidth = Math.max(1.75, cellPixelSize * 0.065);
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
 
-  const toX = (x: number) => (x + 0.5) * scale + offsetX;
-  const toY = (y: number) => (y + 0.5) * scale + offsetY;
+  const toPxX = (x: number) => toGridCol(x) * cellPixelSize;
+  const toPxY = (y: number) => toGridRow(y) * cellPixelSize;
 
   ctx.beginPath();
   for (let y = 0; y < H; y++) {
     for (let x = 0; x < W; x++) {
       if (thinned[y * W + x] === 0) continue;
-      const sx = toX(x);
-      const sy = toY(y);
+      const sx = toPxX(x);
+      const sy = toPxY(y);
       let connected = false;
 
-      // Forward 8-connected neighbors avoid duplicate segments
       if (x + 1 < W && thinned[y * W + (x + 1)] === 1) {
         ctx.moveTo(sx, sy);
-        ctx.lineTo(toX(x + 1), sy);
+        ctx.lineTo(toPxX(x + 1), sy);
         connected = true;
       }
       if (y + 1 < H && thinned[(y + 1) * W + x] === 1) {
         ctx.moveTo(sx, sy);
-        ctx.lineTo(sx, toY(y + 1));
+        ctx.lineTo(sx, toPxY(y + 1));
         connected = true;
       }
       if (x + 1 < W && y + 1 < H && thinned[(y + 1) * W + (x + 1)] === 1) {
         ctx.moveTo(sx, sy);
-        ctx.lineTo(toX(x + 1), toY(y + 1));
+        ctx.lineTo(toPxX(x + 1), toPxY(y + 1));
         connected = true;
       }
       if (x - 1 >= 0 && y + 1 < H && thinned[(y + 1) * W + (x - 1)] === 1) {
         ctx.moveTo(sx, sy);
-        ctx.lineTo(toX(x - 1), toY(y + 1));
+        ctx.lineTo(toPxX(x - 1), toPxY(y + 1));
         connected = true;
       }
 
       if (!connected) {
-        // Check if completely isolated pixel
         const hasPrev =
           (x > 0 && thinned[y * W + (x - 1)] === 1) ||
           (y > 0 && thinned[(y - 1) * W + x] === 1) ||
@@ -650,15 +1147,17 @@ export function renderSkeletonSketchToCanvas(
   if (nuqtaComps.length > 0) {
     ctx.save();
     const r = Math.max(3.5, cellPixelSize * 0.14);
+    const fillAlpha = Math.min(0.4, opacity * 0.32);
+    const strokeAlpha = Math.min(1, opacity * 1.05);
     for (const nc of nuqtaComps) {
-      const nx = toX(nc.cx);
-      const ny = toY(nc.cy);
+      const nx = toPxX(nc.cx);
+      const ny = toPxY(nc.cy);
       ctx.beginPath();
       ctx.arc(nx, ny, r, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(251, 191, 36, 0.22)';
+      ctx.fillStyle = `rgba(251, 191, 36, ${fillAlpha.toFixed(2)})`;
       ctx.fill();
       ctx.lineWidth = 1.4;
-      ctx.strokeStyle = 'rgba(251, 191, 36, 0.78)';
+      ctx.strokeStyle = `rgba(251, 191, 36, ${strokeAlpha.toFixed(2)})`;
       ctx.stroke();
     }
     ctx.restore();
